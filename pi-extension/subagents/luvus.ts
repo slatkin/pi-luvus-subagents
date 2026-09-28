@@ -22,10 +22,12 @@ function luvusBinPath(): string {
 
 /** Shape of `Luvus` CLI `.result` payloads this backend consumes. */
 interface LuvusResult {
-  /** `pane split` — the new pane id */
+  /** `pane split` / `pane move` — the pane id */
   pane?: string | number;
   /** `pane read` — the visible screen text */
   text?: string;
+  /** `agent list` — every agent across all workspaces/tabs */
+  agents?: Array<{ pane?: unknown; tab?: unknown; focused?: unknown; [key: string]: unknown }>;
   [key: string]: unknown;
 }
 
@@ -112,16 +114,46 @@ function paneReadText(result: LuvusResult): string {
   return text;
 }
 
+/** Surface placement for a subagent: a split of the caller's pane, or its own tab. */
+export type SurfacePlacement = "pane" | "tab";
+
 /**
- * Create a new terminal surface for a subagent: split the caller's pane
- * (`$LUVUS_PANE_ID`) without taking focus, then name the new pane after the
- * subagent. Returns the new pane id.
+ * Find the tab hosting the caller's pane via `agent list` (entries carry
+ * `pane` and `tab` fields). Returns null when the caller cannot be found —
+ * callers must then keep pane placement, since a tab move cannot be undone
+ * by a focus restore we cannot compute.
  */
-export function createSurface(name: string): string {
+function findCallerTab(caller: string): string | null {
+  try {
+    const { agents } = luvus(["agent", "list"]);
+    const mine = agents?.find((agent) => String(agent?.pane) === caller);
+    if (mine && mine.tab !== undefined && mine.tab !== null && mine.tab !== "") {
+      return String(mine.tab);
+    }
+  } catch {
+    // Discovery failed — fall back to pane placement.
+  }
+  return null;
+}
+
+/**
+ * Create a new terminal surface for a subagent. Pane placement (the default)
+ * splits the caller's pane (`$LUVUS_PANE_ID`) without taking focus. Tab
+ * placement additionally moves the new pane to its own workspace tab and then
+ * restores focus to the caller's tab, because `pane move --new-tab` always
+ * focuses the moved pane (no --no-focus exists on `pane move` or `tab new`).
+ * Returns the new pane id — valid for pane run/read/close regardless of tab.
+ */
+export function createSurface(name: string, placement: SurfacePlacement = "pane"): string {
   const caller = process.env.LUVUS_PANE_ID;
   if (!caller) {
     throw new Error("LUVUS_PANE_ID is not set. Start pi inside a Luvus pane.");
   }
+
+  // Look up the caller's tab before the split: tab positions shift as other
+  // sessions open and close tabs, so a stale lookup could restore the wrong
+  // tab. An unknown caller tab downgrades the spawn to pane placement.
+  const callerTab = placement === "tab" ? findCallerTab(caller) : null;
 
   const result = luvus(["pane", "split", caller, "--no-focus"]);
   // Verified live (fixture in test/test.ts): the new pane id is `result.pane`.
@@ -135,6 +167,18 @@ export function createSurface(name: string): string {
     luvus(["pane", "name", slugifyPaneName(name), "--pane", surface]);
   } catch {
     // Optional — naming is cosmetic, the pane works unnamed.
+  }
+
+  if (callerTab !== null) {
+    try {
+      luvus(["pane", "move", surface, "--new-tab"]);
+      // ponytail: a user refocusing another tab between move and restore gets
+      // yanked back; an upstream `focus: false` on tab.new removes the race.
+      luvus(["tab", "focus", callerTab]);
+    } catch {
+      // Move failed → the pane is still a correct split of the caller's pane.
+      // Restore failed → focus stays on the subagent's tab, still functional.
+    }
   }
   return surface;
 }
@@ -204,6 +248,26 @@ export async function readScreenAsync(surface: string, lines = 50): Promise<stri
  */
 export function sendEscape(surface: string): void {
   luvus(["agent", "keys", surface, "esc"]);
+}
+
+/** Shape of the `agent prompt` `.result` payload. */
+export interface AgentPromptResult {
+  submitted?: boolean;
+  evidence?: string;
+  pane?: string | number;
+  status?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Deliver `text` to a pane as input and submit it: Luvus `agent prompt` with no
+ * `--wait`. Resolves as soon as Luvus reports the text queued, without waiting
+ * for the target to act. A blocked target (an approval screen, for example)
+ * throws the Luvus `agent_not_ready` error, which callers report rather than
+ * retry.
+ */
+export function agentPrompt(pane: string, text: string): AgentPromptResult {
+  return luvus(["agent", "prompt", pane, text]) as AgentPromptResult;
 }
 
 /**

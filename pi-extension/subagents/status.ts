@@ -1,6 +1,7 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { SurfacePlacement } from "./luvus.ts";
 
 export const SNAPSHOT_STALLED_AFTER_MS = 60_000;
 export const DEFAULT_STATUS_LINE_LIMIT = 4;
@@ -139,14 +140,70 @@ function activityLabel(snapshot: Pick<StatusSnapshot, "activityLabel" | "activeS
 
 export function parseStatusConfig(rawConfig: unknown, source = "config.json"): StatusConfig {
   const config = requireObject(rawConfig, source, "root");
-  const status = requireObject(config.status, source, "status");
+  // `status` is optional so a config that only sets other keys (e.g. `surface`)
+  // still loads; the example default applies.
+  const status = config.status === undefined ? {} : requireObject(config.status, source, "status");
   rejectUnsupportedKeys(status, ["enabled"], source, "status");
-  const enabled = requireBoolean(status.enabled, source, "status.enabled");
+  const enabled = status.enabled === undefined ? true : requireBoolean(status.enabled, source, "status.enabled");
 
   return {
     enabled,
     lineLimit: DEFAULT_STATUS_LINE_LIMIT,
   };
+}
+
+/** Read the optional `surface` placement default from parsed config JSON. */
+export function parseSurfaceConfig(rawConfig: unknown, source = "config.json"): SurfacePlacement {
+  if (rawConfig == null || typeof rawConfig !== "object" || Array.isArray(rawConfig)) {
+    invalidStatusConfig(source, "root must be an object");
+  }
+  const surface = (rawConfig as Record<string, unknown>).surface;
+  return surface === "tab" ? "tab" : "pane";
+}
+
+/**
+ * Load the `surface` placement default from the package config. Unlike the
+ * status config, a missing or unreadable file is not fatal — it just means
+ * "pane", today's behavior.
+ */
+export function loadSurfaceConfig(
+  configPath = DEFAULT_STATUS_CONFIG_PATH,
+  examplePath = STATUS_CONFIG_EXAMPLE_PATH,
+): SurfacePlacement {
+  try {
+    const { sourcePath, rawConfig } = readStatusConfigFile(configPath, examplePath);
+    return parseSurfaceConfig(JSON.parse(rawConfig), sourcePath);
+  } catch {
+    return "pane";
+  }
+}
+
+/**
+ * Persist the `surface` placement default to the package config.json, keeping
+ * any other keys. Reads config.json, falling back to the shipped example as
+ * the base when the user has not created one yet. Throws on invalid JSON so
+ * callers can report it instead of silently truncating the user's config.
+ */
+export function writeSurfaceConfig(
+  placement: SurfacePlacement,
+  configPath = DEFAULT_STATUS_CONFIG_PATH,
+  examplePath = STATUS_CONFIG_EXAMPLE_PATH,
+): void {
+  let base: Record<string, unknown> = {};
+  try {
+    base = JSON.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>;
+  } catch (error) {
+    const errno = error as NodeJS.ErrnoException;
+    if (errno.code !== "ENOENT") {
+      // Existing but unreadable/invalid — refuse to overwrite it.
+      throw error;
+    }
+    try {
+      base = JSON.parse(readFileSync(examplePath, "utf8")) as Record<string, unknown>;
+    } catch {}
+  }
+  base.surface = placement;
+  writeFileSync(configPath, JSON.stringify(base, null, 2) + "\n");
 }
 
 function readStatusConfigFile(configPath: string, examplePath: string): { sourcePath: string; rawConfig: string } {

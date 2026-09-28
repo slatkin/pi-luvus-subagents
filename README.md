@@ -45,20 +45,22 @@ Subagent panes are created without stealing keyboard focus (`pane split --no-foc
 
 ### Extensions
 
-**Subagents** — 4 main-session tools + 3 commands, plus 1 subagent-only tool:
+**Subagents** — 5 main-session tools + 3 commands, plus 1 subagent-only tool:
 
-| Tool                 | Description                                                                                 |
-| -------------------- | ------------------------------------------------------------------------------------------- |
-| `subagent`           | Spawn a sub-agent in a dedicated Luvus pane (async — returns immediately)                   |
-| `subagent_interrupt` | Interrupt a running Pi-backed subagent's current turn                                       |
-| `subagents_list`     | List available agent definitions                                                            |
-| `subagent_resume`    | Resume a previous sub-agent session (async)                                                 |
+| Tool                 | Description                                                                                  |
+| -------------------- | -------------------------------------------------------------------------------------------- |
+| `subagent`           | Spawn a sub-agent in a dedicated Luvus pane (async — returns immediately)                    |
+| `subagent_interrupt` | Interrupt a running Pi-backed subagent's current turn                                        |
+| `subagent_message`   | Message the parent, a running child, or a running sibling without ending the session (async) |
+| `subagents_list`     | List available agent definitions                                                             |
+| `subagent_resume`    | Resume a previous sub-agent session (async)                                                  |
 
 | Command                    | Description                          |
 | -------------------------- | ------------------------------------ |
 | `/plan`                    | Start a full planning workflow       |
 | `/iterate`                 | Fork into a subagent for quick fixes |
 | `/subagent <agent> <task>` | Spawn a named agent directly         |
+| `/subagent-surface [pane\|tab]` | Show or set the default subagent surface |
 
 ### Bundled Agents
 
@@ -122,11 +124,14 @@ cp config.json.example config.json
 {
   "status": {
     "enabled": true
-  }
+  },
+  "surface": "pane"
 }
 ```
 
 `config.json` is gitignored so local overrides don't get committed.
+
+Set `"surface": "tab"` to open subagents in their own workspace tab instead of splitting your pane (focus always returns to your pane). Change it live with `/subagent-surface pane|tab`, or override a single spawn with the `subagent` tool's `surface` parameter.
 
 ---
 
@@ -160,6 +165,7 @@ subagent({ name: "Designer", agent: "game-designer", cwd: "agents/game-designer"
 | `skills`               | string  | —              | Comma-separated skill names                                                                       |
 | `tools`                | string  | —              | Comma-separated tool names                                                                        |
 | `cwd`                  | string  | —              | Working directory for the sub-agent (see [Role Folders](#role-folders))                           |
+| `surface`              | string  | config default | `"pane"` splits the caller's pane; `"tab"` opens the subagent in its own workspace tab (focus always returns to the caller). Overrides the `surface` key in `config.json` for this spawn. |
 
 ---
 
@@ -178,6 +184,33 @@ This sends Escape to the child pane, cancelling the in-progress model turn. The 
 This is a turn-level interrupt, not a method for forcibly terminating a subagent session.
 
 > **Note:** Only Pi-backed subagents are supported. Claude-backed runs will return an error.
+
+---
+
+## Messaging other agents
+
+Use `subagent_message` to pass text to another agent in the same tree while everyone keeps working:
+
+```typescript
+subagent_message({ to: "parent", message: "Which DB driver should I use?" });
+subagent_message({ to: "Reviewer", message: "API is in src/api.ts" });
+```
+
+**Reachable targets** — exactly these three, nothing else:
+
+- `parent` — the agent that spawned you (subagents only)
+- the display name or id of one of your own running children
+- the display name or id of a running sibling (another running child of your parent)
+
+Grandchildren, grandparents, finished subagents, and unrelated agents are not reachable. Sending to a finished child returns an error listing what _is_ reachable; use `subagent_resume` for a finished session. If a name is ambiguous, pass the exact subagent id.
+
+**Delivery** — messages to children and siblings go through Luvus `agent prompt` and appear in the target's pane as input, prefixed with a sender header like `[subagent message from Worker (sibling)]`. Messages to `parent` are appended to the child's message file and injected into the parent as a steering message, so they never touch a draft the user is typing in the parent's composer.
+
+Delivery is asynchronous: the tool returns once the message is queued, and any reply arrives later as a separate message. A Luvus error such as `agent_not_ready` is reported, never retried automatically.
+
+`subagent_message`, `caller_ping` and `subagent_done` are different: `caller_ping` and `subagent_done` **end** the sending session; `subagent_message` does not.
+
+> **Note:** Claude Code subagents can receive messages, but they have no `subagent_message` sending tool.
 
 ---
 

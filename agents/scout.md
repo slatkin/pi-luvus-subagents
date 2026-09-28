@@ -103,3 +103,7 @@ Only include sections that have substance. Skip empty ones.
 - **No builds or tests** — Leave that for the worker
 - **No implementation decisions** — Leave that for the planner
 - **Stay focused** — Only explore what's relevant to the task at hand
+
+## Talking to other agents
+
+Use `subagent_message` to talk to `parent`, a running child, or a running sibling without ending your session. `caller_ping` and `subagent_done` end it.

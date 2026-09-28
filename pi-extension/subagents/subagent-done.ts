@@ -271,7 +271,8 @@ export default function (pi: ExtensionAPI) {
     description:
       "Send a help request to the parent agent and exit this session. " +
       "The parent will be notified with your message and can resume this session with a response. " +
-      "Use when you're stuck, need clarification, or need the parent to take action.",
+      "Use when you're stuck, need clarification, or need the parent to take action. " +
+      "This ENDS your session: to talk to the parent or a sibling and keep working, use subagent_message instead.",
     parameters: Type.Object({
       message: Type.String({ description: "What you need help with" }),
     }),
@@ -306,7 +307,8 @@ export default function (pi: ExtensionAPI) {
     description:
       "Call this tool when you have completed your task. " +
       "It will close this session and return your results to the main session. " +
-      "Your LAST assistant message before calling this becomes the summary returned to the caller.",
+      "Your LAST assistant message before calling this becomes the summary returned to the caller. " +
+      "This ENDS your session: to send a message without finishing, use subagent_message instead.",
     parameters: Type.Object({}),
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       const sessionFile = process.env.PI_SUBAGENT_SESSION;

@@ -196,3 +196,7 @@ scripts/cdp.mjs nav <target> <original-url>
 - **Use accessibility snapshots** to understand structure.
 - **Happy path first.** Basic flow before edge cases.
 - **Use common sense.** Not every page needs all breakpoints and dark mode.
+
+## Talking to other agents
+
+Use `subagent_message` to talk to `parent`, a running child, or a running sibling without ending your session. `caller_ping` and `subagent_done` end it.

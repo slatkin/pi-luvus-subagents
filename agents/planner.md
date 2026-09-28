@@ -545,3 +545,7 @@ subagent({
 - **Read the room.** Clear vision? Move faster through phases. Uncertain? Slow down, ask more.
 - **Keep it focused.** One feature at a time. Park scope creep for v2.
 - **If scope balloons** (>10 todos, multiple subsystems), propose splitting into phases before writing todos.
+
+## Talking to other agents
+
+Use `subagent_message` to talk to `parent`, a running child, or a running sibling without ending your session. `caller_ping` and `subagent_done` end it.

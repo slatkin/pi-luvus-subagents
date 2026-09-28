@@ -8,9 +8,12 @@ import {
   readdirSync,
   readFileSync,
   writeFileSync,
+  appendFileSync,
   existsSync,
   mkdirSync,
   copyFileSync,
+  renameSync,
+  rmSync,
   unlinkSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -24,6 +27,8 @@ import {
   sendEscape,
   shellEscape,
   readScreen,
+  agentPrompt,
+  type SurfacePlacement,
 } from "./luvus.ts";
 
 import {
@@ -43,6 +48,8 @@ import {
   formatTransitionLine,
   observeStatus,
   loadStatusConfig,
+  loadSurfaceConfig,
+  writeSurfaceConfig,
 } from "./status.ts";
 import {
   getSubagentActivityFile,
@@ -122,6 +129,12 @@ const SubagentParams = Type.Object({
     Type.String({
       description:
         "Resume a previous Claude Code session by its ID. Loads the conversation history and continues where it left off. The session ID is returned in details of every claude tool call. Use this to retry cancelled runs or ask follow-up questions.",
+    }),
+  ),
+  surface: Type.Optional(
+    Type.Union([Type.Literal("pane"), Type.Literal("tab")], {
+      description:
+        'Where to open the subagent: "pane" splits this pane (default), "tab" gives the subagent its own workspace tab with focus returned here. Overrides the configured default for this spawn only.',
     }),
   ),
 });
@@ -414,6 +427,33 @@ function getArtifactDir(sessionDir: string, sessionId: string): string {
 
 const statusConfig = loadStatusConfig();
 
+// Subagent surface placement default: "pane" (split the caller's pane) or
+// "tab" (own workspace tab). Loaded from config.json, changeable at runtime
+// via /subagent-surface, overridable per call via the tool's `surface` param.
+let surfaceDefault: SurfacePlacement = loadSurfaceConfig();
+
+export function getSurfaceDefault(): SurfacePlacement {
+  return surfaceDefault;
+}
+
+export function setSurfaceDefault(value: SurfacePlacement): void {
+  surfaceDefault = value;
+}
+
+/** Resolve placement for one spawn: explicit tool param > configured default. */
+export function resolveSurfacePlacement(param: unknown): SurfacePlacement {
+  if (param === "pane" || param === "tab") return param;
+  return surfaceDefault;
+}
+
+// Test hook: redirect config.json writes away from the package root.
+let surfaceConfigPath: string | undefined;
+export const __surfaceTest__ = {
+  setConfigPath(path: string | undefined) {
+    surfaceConfigPath = path;
+  },
+};
+
 function formatWidgetRightLabel(snapshot: StatusSnapshot): string {
   if (snapshot.kind === "starting") return " starting… ";
   if (snapshot.kind === "running") return ` running ${snapshot.elapsedText} `;
@@ -502,6 +542,8 @@ interface RunningSubagent {
   abortController?: AbortController;
   cli?: string;
   sentinelFile?: string;
+  /** Byte offset of the parent's next unread line in this child's `.msg` file. */
+  messageOffset?: number;
   statusState: SubagentStatusState;
   /**
    * When true, status transitions (stalled/recovered) do not wake the parent
@@ -514,6 +556,434 @@ interface RunningSubagent {
 
 /** All currently running subagents, keyed by id. */
 const runningSubagents = new Map<string, RunningSubagent>();
+
+// ── Parent/child messaging (design Decisions 4, 5, 8) ──
+//
+// Children and siblings are addressed through Luvus `agent prompt` (luvus.ts).
+// `parent` is not: typing into the parent's pane merges with and submits
+// whatever draft the user is composing there (task 1.1, case d), so a child
+// appends JSON lines to `<session>.msg` and the parent's existing poll loop
+// injects them as steering messages.
+
+interface SubagentRosterChild {
+  id: string;
+  name: string;
+  pane: string;
+  cli: string;
+}
+
+interface SubagentRoster {
+  parentPane: string;
+  parentName: string;
+  children: SubagentRosterChild[];
+}
+
+interface ParentMessage {
+  header: string;
+  message: string;
+}
+
+/** Where this process publishes its roster, set on the first spawn or resume. */
+let rosterContext: { file: string; parentPane: string; parentName: string } | null = null;
+
+function getRosterFile(artifactDir: string): string {
+  return join(artifactDir, "subagent-roster.json");
+}
+
+/** The file a child appends parent-bound messages to. */
+function getParentMessageFile(sessionFile: string): string {
+  return `${sessionFile}.msg`;
+}
+
+/** Pure mirror of `runningSubagents` as published for children. */
+export function buildRosterPayload(params: {
+  parentPane: string;
+  parentName: string;
+  children: Iterable<Pick<RunningSubagent, "id" | "name" | "surface" | "cli">>;
+}): SubagentRoster {
+  return {
+    parentPane: params.parentPane,
+    parentName: params.parentName,
+    children: Array.from(params.children, (child) => ({
+      id: child.id,
+      name: child.name,
+      pane: child.surface,
+      cli: child.cli ?? "pi",
+    })),
+  };
+}
+
+/** Record where this process's roster lives (idempotent). */
+function ensureRosterContext(ctx: {
+  sessionManager: { getSessionDir(): string; getSessionId(): string };
+}): void {
+  if (rosterContext) return;
+  rosterContext = {
+    file: getRosterFile(
+      getArtifactDir(ctx.sessionManager.getSessionDir(), ctx.sessionManager.getSessionId()),
+    ),
+    parentPane: process.env.LUVUS_PANE_ID ?? "",
+    parentName: process.env.PI_SUBAGENT_NAME ?? "parent",
+  };
+}
+
+/**
+ * Rewrite the roster file to mirror `runningSubagents`, atomically. Called on
+ * every spawn, resume and exit so children can resolve siblings. Best effort:
+ * without it the sender just loses the sibling lookup.
+ */
+function writeRoster(): void {
+  if (!rosterContext) return;
+  try {
+    const payload = buildRosterPayload({
+      parentPane: rosterContext.parentPane,
+      parentName: rosterContext.parentName,
+      children: runningSubagents.values(),
+    });
+    mkdirSync(dirname(rosterContext.file), { recursive: true });
+    const tmp = `${rosterContext.file}.tmp`;
+    writeFileSync(tmp, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+    renameSync(tmp, rosterContext.file);
+  } catch {
+    // Best effort — see the doc comment.
+  }
+}
+
+function parentRosterEnvParts(rosterFile: string | undefined): string[] {
+  return rosterFile ? [`PI_SUBAGENT_PARENT_ROSTER=${shellEscape(rosterFile)}`] : [];
+}
+
+/** Env prefix for a freshly spawned pi subagent. */
+export function buildSpawnEnvParts(params: {
+  name: string;
+  agent?: string;
+  autoExit?: boolean;
+  subagentSessionFile: string;
+  id: string;
+  activityFile: string;
+  surface: string;
+  codingAgentDir?: string;
+  denySet: Set<string>;
+  parentRosterFile?: string;
+}): string[] {
+  const envParts: string[] = [];
+  if (params.codingAgentDir) {
+    envParts.push(`PI_CODING_AGENT_DIR=${shellEscape(params.codingAgentDir)}`);
+  }
+  if (params.denySet.size > 0) {
+    envParts.push(`PI_DENY_TOOLS=${shellEscape([...params.denySet].join(","))}`);
+  }
+  envParts.push(`PI_SUBAGENT_NAME=${shellEscape(params.name)}`);
+  if (params.agent) envParts.push(`PI_SUBAGENT_AGENT=${shellEscape(params.agent)}`);
+  if (params.autoExit) envParts.push(`PI_SUBAGENT_AUTO_EXIT=1`);
+  envParts.push(`PI_SUBAGENT_SESSION=${shellEscape(params.subagentSessionFile)}`);
+  envParts.push(`PI_SUBAGENT_ID=${shellEscape(params.id)}`);
+  envParts.push(`PI_SUBAGENT_ACTIVITY_FILE=${shellEscape(params.activityFile)}`);
+  envParts.push(`PI_SUBAGENT_SURFACE=${shellEscape(params.surface)}`);
+  envParts.push(...parentRosterEnvParts(params.parentRosterFile));
+  return envParts;
+}
+
+/** Env prefix for a resumed pi subagent. */
+export function buildResumeEnvParts(params: {
+  name: string;
+  sessionPath: string;
+  id: string;
+  activityFile: string;
+  autoExit: boolean;
+  codingAgentDir?: string;
+  parentRosterFile?: string;
+}): string[] {
+  const envParts: string[] = [];
+  if (params.codingAgentDir) {
+    envParts.push(`PI_CODING_AGENT_DIR=${shellEscape(params.codingAgentDir)}`);
+  }
+  envParts.push(`PI_SUBAGENT_NAME=${shellEscape(params.name)}`);
+  envParts.push(`PI_SUBAGENT_SESSION=${shellEscape(params.sessionPath)}`);
+  envParts.push(`PI_SUBAGENT_ID=${shellEscape(params.id)}`);
+  envParts.push(`PI_SUBAGENT_ACTIVITY_FILE=${shellEscape(params.activityFile)}`);
+  if (params.autoExit) envParts.push(`PI_SUBAGENT_AUTO_EXIT=1`);
+  envParts.push(...parentRosterEnvParts(params.parentRosterFile));
+  return envParts;
+}
+
+export type SubagentRelation = "parent" | "child" | "sibling";
+
+export interface MessageTarget {
+  relation: SubagentRelation;
+  name: string;
+  /** Pane id for child and sibling targets; absent for `parent`. */
+  id?: string;
+  pane?: string;
+}
+
+/** Names the sender can reach right now, for the "no such target" error. */
+function reachableTargetNames(params: {
+  hasParent: boolean;
+  ownChildren: Array<Pick<RunningSubagent, "name">>;
+  parentRoster: SubagentRoster | null;
+  selfId: string;
+}): string[] {
+  const names: string[] = [];
+  if (params.hasParent) names.push("parent");
+  for (const child of params.ownChildren) names.push(child.name);
+  for (const sibling of params.parentRoster?.children ?? []) {
+    if (sibling.id !== params.selfId) names.push(sibling.name);
+  }
+  return [...new Set(names)];
+}
+
+/**
+ * Resolve a `to` target (design Decision 4): `parent`, one of the sender's own
+ * running children, or a running sibling (the parent's other children minus
+ * the sender). Exact ids win over names; an ambiguous name reports its matches.
+ */
+export function resolveMessageTarget(params: {
+  hasParent: boolean;
+  ownChildren: Iterable<Pick<RunningSubagent, "id" | "name" | "surface">>;
+  parentRoster: SubagentRoster | null;
+  selfId: string;
+  to: string;
+}): { target: MessageTarget } | { error: string } {
+  const to = params.to?.trim();
+  // Materialize once: `ownChildren` is often a live Map iterator, and both the
+  // candidate search and the reachable-names error would otherwise consume it.
+  const ownChildren = Array.from(params.ownChildren);
+  const reachable = () =>
+    reachableTargetNames({ ...params, ownChildren }).join(", ") || "(none)";
+
+  if (!to) {
+    return { error: `Provide a target: \`parent\`, a child, or a sibling. Reachable: ${reachable()}.` };
+  }
+  if (to === "parent") {
+    if (!params.hasParent) return { error: "This agent has no parent." };
+    return { target: { relation: "parent", name: "parent" } };
+  }
+
+  const candidates: MessageTarget[] = [
+    ...ownChildren.map((child): MessageTarget => ({
+      relation: "child",
+      id: child.id,
+      name: child.name,
+      pane: child.surface,
+    })),
+    ...(params.parentRoster?.children ?? [])
+      .filter((sibling) => sibling.id !== params.selfId)
+      .map((sibling): MessageTarget => ({
+        relation: "sibling",
+        id: sibling.id,
+        name: sibling.name,
+        pane: sibling.pane,
+      })),
+  ];
+
+  const byId = candidates.find((candidate) => candidate.id === to);
+  if (byId) return { target: byId };
+
+  const byName = candidates.filter((candidate) => candidate.name === to);
+  if (byName.length === 1) return { target: byName[0] };
+  if (byName.length > 1) {
+    const matches = byName.map((candidate) => `${candidate.name} [${candidate.id}]`).join(", ");
+    return { error: `Ambiguous subagent name "${to}". Matches: ${matches}` };
+  }
+
+  return { error: `No reachable agent named "${to}". Reachable: ${reachable()}.` };
+}
+
+/**
+ * Header line prepended to every delivered message (design Decision 5). The
+ * sender's relation is named for children and siblings, and omitted when the
+ * sender is the receiver's parent.
+ */
+export function formatMessageHeader(params: {
+  senderName: string;
+  targetRelation: SubagentRelation;
+}): string {
+  if (params.targetRelation === "parent") {
+    return `[subagent message from ${params.senderName} (child)]`;
+  }
+  if (params.targetRelation === "sibling") {
+    return `[subagent message from ${params.senderName} (sibling)]`;
+  }
+  return `[subagent message from ${params.senderName}]`;
+}
+
+/** The launch-prompt line naming the peers a fresh subagent can message. */
+export function buildLaunchMessagingHint(siblingNames: string[]): string {
+  const names = [...new Set(["parent", ...siblingNames])];
+  const list = names.map((name) => `\`${name}\``).join(", ");
+  return `You can message ${list} with subagent_message; it does not end your session.`;
+}
+
+export function buildSubagentTaskPrompt(params: {
+  task: string;
+  roleBlock: string;
+  modeHint: string;
+  summaryInstruction: string;
+  messagingHint: string;
+  inheritsConversationContext: boolean;
+}): string {
+  return params.inheritsConversationContext
+    ? `${params.task}\n\n${params.messagingHint}`
+    : `${params.roleBlock}\n\n${params.modeHint}\n\n${params.messagingHint}\n\n${params.task}\n\n${params.summaryInstruction}`;
+}
+
+/** Append one parent-bound message to a child's `<session>.msg` file. */
+export function appendParentMessage(file: string, payload: ParentMessage): void {
+  appendFileSync(file, `${JSON.stringify(payload)}\n`, "utf8");
+}
+
+/**
+ * Read complete JSON lines from a child's message file, starting at byte
+ * `offset`. A trailing line without its newline is left for the next call.
+ */
+export function readParentMessages(
+  file: string,
+  offset: number,
+): { messages: ParentMessage[]; offset: number } {
+  let raw: Buffer;
+  try {
+    raw = readFileSync(file);
+  } catch {
+    return { messages: [], offset };
+  }
+  const start = offset > raw.length ? 0 : offset;
+  const chunk = raw.subarray(start);
+  const lastNewline = chunk.lastIndexOf(0x0a);
+  if (lastNewline < 0) return { messages: [], offset: start };
+
+  const messages: ParentMessage[] = [];
+  for (const line of chunk.subarray(0, lastNewline).toString("utf8").split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const parsed = JSON.parse(line);
+      if (typeof parsed?.header === "string" && typeof parsed?.message === "string") {
+        messages.push({ header: parsed.header, message: parsed.message });
+      }
+    } catch {
+      // Skip a malformed line rather than stalling the file on it.
+    }
+  }
+  return { messages, offset: start + lastNewline + 1 };
+}
+
+/** Inject any newly written parent-bound messages into this session. */
+function deliverParentMessages(running: RunningSubagent, pi: ExtensionAPI): void {
+  const { messages, offset } = readParentMessages(
+    getParentMessageFile(running.sessionFile),
+    running.messageOffset ?? 0,
+  );
+  running.messageOffset = offset;
+  for (const message of messages) {
+    pi.sendMessage(
+      {
+        customType: "subagent_message",
+        content: `${message.header}\n${message.message}`,
+        display: true,
+        details: { from: running.name, id: running.id },
+      },
+      { triggerTurn: true, deliverAs: "steer" },
+    );
+  }
+}
+
+/** Deliver a finished child's last messages, then drop its file. */
+function drainAndRemoveParentMessages(running: RunningSubagent, pi: ExtensionAPI): void {
+  deliverParentMessages(running, pi);
+  try {
+    rmSync(getParentMessageFile(running.sessionFile), { force: true });
+  } catch {
+    // Best effort — a stale file only delays the next child's messages.
+  }
+}
+
+/** Read this process's parent roster (path passed to children at spawn). */
+function readParentRoster(): SubagentRoster | null {
+  const file = process.env.PI_SUBAGENT_PARENT_ROSTER;
+  if (!file) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8"));
+    if (parsed && Array.isArray(parsed.children)) return parsed as SubagentRoster;
+  } catch {
+    // Missing or half-written roster: sibling lookup is simply unavailable.
+  }
+  return null;
+}
+
+const SubagentMessageParams = Type.Object({
+  to: Type.String({
+    description:
+      "Target: `parent`, one of your own running children, or a running sibling. Use an exact subagent id or display name.",
+  }),
+  message: Type.String({ description: "Message text (must not be empty)." }),
+});
+
+/**
+ * Validate, resolve and deliver one `subagent_message` call. Exported for unit
+ * testing: `deps` lets a test observe whether Luvus was used at all.
+ */
+export function sendSubagentMessage(
+  input: { to: string; message: string },
+  context: {
+    hasParent: boolean;
+    ownChildren: Iterable<Pick<RunningSubagent, "id" | "name" | "surface">>;
+    parentRoster: SubagentRoster | null;
+    selfId: string;
+    senderName: string;
+    parentMessageFile: string | null;
+  },
+  deps: {
+    prompt: (pane: string, text: string) => unknown;
+    append: (file: string, payload: ParentMessage) => void;
+  },
+): { ok: true; target: MessageTarget; text: string } | { error: string } {
+  if (!input.message?.trim()) {
+    return { error: "message must not be empty." };
+  }
+
+  const resolved = resolveMessageTarget({
+    hasParent: context.hasParent,
+    ownChildren: context.ownChildren,
+    parentRoster: context.parentRoster,
+    selfId: context.selfId,
+    to: input.to,
+  });
+  if ("error" in resolved) return resolved;
+
+  const target = resolved.target;
+  const payload: ParentMessage = {
+    header: formatMessageHeader({ senderName: context.senderName, targetRelation: target.relation }),
+    message: input.message,
+  };
+
+  if (target.relation === "parent") {
+    if (!context.parentMessageFile) return { error: "This agent has no parent." };
+    try {
+      deps.append(context.parentMessageFile, payload);
+    } catch (error: any) {
+      return { error: `Failed to write the parent message file: ${error?.message ?? String(error)}` };
+    }
+    return {
+      ok: true,
+      target,
+      text:
+        "Message sent to parent. It arrives as a steering message; a reply will come back as a separate message.",
+    };
+  }
+
+  try {
+    deps.prompt(target.pane!, `${payload.header}\n${payload.message}`);
+  } catch (error: any) {
+    return { error: `Failed to send to "${target.name}" via Luvus: ${error?.message ?? String(error)}` };
+  }
+  return {
+    ok: true,
+    target,
+    text:
+      `Message sent to "${target.name}" (pane ${target.pane}). Delivery is asynchronous; ` +
+      "a reply will arrive as a separate message.",
+  };
+}
 
 // ── Widget management ──
 
@@ -657,7 +1127,7 @@ function updateWidget() {
  * first positional message so that /skill: args land in messages[1..] and arrive
  * as standalone prompts in the child session.
  */
-const SUBAGENT_CONTROL_TOOLS = ["caller_ping", "subagent_done"] as const;
+const SUBAGENT_CONTROL_TOOLS = ["caller_ping", "subagent_done", "subagent_message"] as const;
 
 /**
  * Build the child --tools allowlist.
@@ -907,6 +1377,21 @@ export const __test__ = {
   handleSubagentInterrupt,
   resolveResultPresentation,
   resolveResumeLaunchBehavior,
+  buildRosterPayload,
+  buildSpawnEnvParts,
+  buildResumeEnvParts,
+  resolveMessageTarget,
+  formatMessageHeader,
+  buildLaunchMessagingHint,
+  buildSubagentTaskPrompt,
+  sendSubagentMessage,
+  appendParentMessage,
+  readParentMessages,
+  drainAndRemoveParentMessages,
+  writeRoster,
+  setRosterContext(ctx: { file: string; parentPane: string; parentName: string } | null) {
+    rosterContext = ctx;
+  },
   runningSubagents,
   formatElapsed,
 };
@@ -929,7 +1414,7 @@ function startWidgetRefresh() {
 async function launchSubagent(
   params: typeof SubagentParams.static,
   ctx: { sessionManager: { getSessionFile(): string | null; getSessionId(): string; getSessionDir(): string }; cwd: string },
-  options?: { surface?: string },
+  options?: { surface?: string; placement?: SurfacePlacement },
 ): Promise<RunningSubagent> {
   const startTime = Date.now();
   const id = Math.random().toString(16).slice(2, 10);
@@ -945,6 +1430,7 @@ async function launchSubagent(
   if (!sessionFile) throw new Error("No session file");
   const sessionId = ctx.sessionManager.getSessionId();
   const artifactDir = getArtifactDir(ctx.sessionManager.getSessionDir(), sessionId);
+  ensureRosterContext(ctx);
 
   const { effectiveCwd, localAgentDir, effectiveAgentDir } = resolveSubagentPaths(params, agentDefs);
   const targetCwdForSession = effectiveCwd ?? ctx.cwd;
@@ -965,7 +1451,7 @@ async function launchSubagent(
   // Use pre-created surface (parallel mode) or create a new one.
   // For new surfaces, pause briefly so the shell is ready before sending the command.
   const surfacePreCreated = !!options?.surface;
-  const surface = options?.surface ?? createSurface(params.name);
+  const surface = options?.surface ?? createSurface(params.name, options?.placement ?? "pane");
   if (!surfacePreCreated) {
     await new Promise<void>((resolve) => setTimeout(resolve, getShellReadyDelayMs()));
   }
@@ -999,9 +1485,15 @@ async function launchSubagent(
   const systemPromptMode = agentDefs?.systemPromptMode;
   const identityInSystemPrompt = systemPromptMode && identity;
   const roleBlock = identity && !identityInSystemPrompt ? `\n\n${identity}` : "";
-  const fullTask = inheritsConversationContext
-    ? params.task
-    : `${roleBlock}\n\n${modeHint}\n\n${params.task}\n\n${summaryInstruction}`;
+  const siblingNames = Array.from(runningSubagents.values(), (running) => running.name);
+  const fullTask = buildSubagentTaskPrompt({
+    task: params.task,
+    roleBlock,
+    modeHint,
+    summaryInstruction,
+    messagingHint: buildLaunchMessagingHint(siblingNames),
+    inheritsConversationContext,
+  });
   // ── Claude Code CLI path ──
   if (agentDefs?.cli === "claude") {
     const sentinelFile = `/tmp/pi-claude-${id}-done`;
@@ -1072,6 +1564,7 @@ async function launchSubagent(
     };
 
     runningSubagents.set(id, running);
+    writeRoster();
     return running;
   }
 
@@ -1112,31 +1605,23 @@ async function launchSubagent(
     parts.push("--tools", shellEscape(toolAllowlist));
   }
 
-  // Build env prefix: denied tools + subagent identity + config dir propagation
-  const envParts: string[] = [];
-
-  // If the target cwd has its own .pi/agent/, use that as the config root.
-  // Otherwise propagate the current/global agent dir.
-  if (localAgentDir && existsSync(localAgentDir)) {
-    envParts.push(`PI_CODING_AGENT_DIR=${shellEscape(localAgentDir)}`);
-  } else if (process.env.PI_CODING_AGENT_DIR) {
-    envParts.push(`PI_CODING_AGENT_DIR=${shellEscape(process.env.PI_CODING_AGENT_DIR)}`);
-  }
-
-  if (denySet.size > 0) {
-    envParts.push(`PI_DENY_TOOLS=${shellEscape([...denySet].join(","))}`);
-  }
-  envParts.push(`PI_SUBAGENT_NAME=${shellEscape(params.name)}`);
-  if (params.agent) {
-    envParts.push(`PI_SUBAGENT_AGENT=${shellEscape(params.agent)}`);
-  }
-  if (agentDefs?.autoExit) {
-    envParts.push(`PI_SUBAGENT_AUTO_EXIT=1`);
-  }
-  envParts.push(`PI_SUBAGENT_SESSION=${shellEscape(subagentSessionFile)}`);
-  envParts.push(`PI_SUBAGENT_ID=${shellEscape(id)}`);
-  envParts.push(`PI_SUBAGENT_ACTIVITY_FILE=${shellEscape(activityFile)}`);
-  envParts.push(`PI_SUBAGENT_SURFACE=${shellEscape(surface)}`);
+  // Build env prefix: denied tools + subagent identity + config dir propagation.
+  // If the target cwd has its own .pi/agent/, that wins; else propagate the
+  // current/global agent dir.
+  const codingAgentDir =
+    localAgentDir && existsSync(localAgentDir) ? localAgentDir : process.env.PI_CODING_AGENT_DIR;
+  const envParts = buildSpawnEnvParts({
+    name: params.name,
+    agent: params.agent,
+    autoExit: agentDefs?.autoExit,
+    subagentSessionFile,
+    id,
+    activityFile,
+    surface,
+    codingAgentDir,
+    denySet,
+    parentRosterFile: rosterContext?.file,
+  });
   const envPrefix = envParts.join(" ") + " ";
 
   // Pass task and skill prompts to the sub-agent.
@@ -1210,6 +1695,7 @@ async function launchSubagent(
   };
 
   runningSubagents.set(id, running);
+  writeRoster();
   return running;
 }
 
@@ -1242,6 +1728,7 @@ function copyClaudeSession(sentinelFile: string): string | null {
 async function watchSubagent(
   running: RunningSubagent,
   signal: AbortSignal,
+  pi: ExtensionAPI,
 ): Promise<SubagentResult> {
   const { name, task, surface, startTime, sessionFile } = running;
 
@@ -1252,8 +1739,13 @@ async function watchSubagent(
       sentinelFile: running.sentinelFile,
       onTick() {
         observeRunningSubagent(running);
+        deliverParentMessages(running, pi);
       },
     });
+
+    // A child can write its last message just before exiting; deliver it before
+    // the completion result so ordering matches what the child observed.
+    drainAndRemoveParentMessages(running, pi);
 
     const elapsed = Math.floor((Date.now() - startTime) / 1000);
 
@@ -1289,6 +1781,7 @@ async function watchSubagent(
 
       closeSurface(surface);
       runningSubagents.delete(running.id);
+      writeRoster();
 
       return { name, task, summary, exitCode: result.exitCode, elapsed, ...(sessionId ? { claudeSessionId: sessionId } : {}) };
     }
@@ -1314,6 +1807,7 @@ async function watchSubagent(
 
     closeSurface(surface);
     runningSubagents.delete(running.id);
+    writeRoster();
 
     return {
       name,
@@ -1328,8 +1822,16 @@ async function watchSubagent(
   } catch (err: any) {
     try {
       closeSurface(surface);
-    } catch {}
+    } catch {
+      // The pane may already be gone.
+    }
     runningSubagents.delete(running.id);
+    writeRoster();
+    try {
+      rmSync(getParentMessageFile(sessionFile), { force: true });
+    } catch {
+      // Best effort — we are unwinding, so nothing is injected.
+    }
 
     if (signal.aborted) {
       return {
@@ -1377,6 +1879,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       agent.abortController?.abort();
     }
     runningSubagents.clear();
+    rosterContext = null;
   });
 
   // Tools denied via PI_DENY_TOOLS env var (set by parent agent based on frontmatter)
@@ -1400,14 +1903,16 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         "When the sub-agent finishes, the harness AUTOMATICALLY delivers its result as a steer message that wakes you up and starts a new turn — you do not need to do anything to receive it. " +
         "DO NOT write polling loops, sleep/wait commands, tail/watch scripts, or repeatedly read session/log files to detect completion. DO NOT call subagents_list or any other tool to 'check' status. All of that is wasted work — the harness handles delivery for you. " +
         "DO NOT fabricate, assume, or summarize results after calling this tool. " +
-        "After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you with the result when it is ready.",
+        "After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you with the result when it is ready. " +
+        'Placement: optional surface parameter — "pane" (default) splits this pane, "tab" gives the sub-agent its own workspace tab; either way keyboard focus stays on this pane (tab placement restores it).',
       promptSnippet:
-        "Spawn a sub-agent in a dedicated terminal multiplexer pane. " +
+        "Spawn a sub-agent in a dedicated terminal multiplexer pane or its own tab. " +
         "This is a fire-and-forget async tool: the call returns immediately with only an acknowledgement. " +
         "When the sub-agent finishes, the harness AUTOMATICALLY delivers its result as a steer message that wakes you up and starts a new turn — you do not need to do anything to receive it. " +
         "DO NOT write polling loops, sleep/wait commands, tail/watch scripts, or repeatedly read session/log files to detect completion. DO NOT call subagents_list or any other tool to 'check' status. All of that is wasted work — the harness handles delivery for you. " +
         "DO NOT fabricate, assume, or summarize results after calling this tool. " +
-        "After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you with the result when it is ready.",
+        "After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you with the result when it is ready. " +
+        'Placement: optional surface parameter — "pane" (default) splits this pane, "tab" gives the sub-agent its own workspace tab; either way keyboard focus stays on this pane (tab placement restores it).',
       parameters: SubagentParams,
 
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -1442,8 +1947,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           };
         }
 
-        // Launch the subagent (creates pane, sends command)
-        const running = await launchSubagent(params, ctx);
+        // Launch the subagent (creates pane or tab, sends command)
+        const running = await launchSubagent(params, ctx, {
+          placement: resolveSurfacePlacement(params.surface),
+        });
 
         // Create a separate AbortController for the watcher
         // (the tool's signal completes when we return)
@@ -1455,7 +1962,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         startStatusRefresh(pi);
 
         // Fire-and-forget: start watching in background
-        watchSubagent(running, watcherAbort.signal)
+        watchSubagent(running, watcherAbort.signal, pi)
           .then((result) => {
             updateWidget(); // reflect removal from Map immediately
 
@@ -1650,6 +2157,87 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       },
     });
 
+  // ── subagent_message tool ──
+  if (shouldRegister("subagent_message"))
+    pi.registerTool({
+      name: "subagent_message",
+      label: "Message Subagent",
+      description:
+        "Send a short text message to `parent`, one of your own running children, or a running sibling, " +
+        "without ending your session. Fire-and-forget: it returns once the message is queued, and any reply " +
+        "arrives later as a separate message. Use this, not caller_ping or subagent_done, when you want to " +
+        "keep working — caller_ping and subagent_done both END your session.",
+      promptSnippet:
+        "Send a short text message to `parent`, a running child, or a running sibling without ending your session. " +
+        "Fire-and-forget; replies arrive as separate messages. Unlike caller_ping and subagent_done, this does not end your session.",
+      parameters: SubagentMessageParams,
+
+      async execute(
+        _toolCallId,
+        params,
+      ): Promise<
+        AgentToolResult<{ error?: string; name?: string; pane?: string; relation?: string }>
+      > {
+        if (!isMuxAvailable()) return muxUnavailableResult();
+
+        const sessionFile = process.env.PI_SUBAGENT_SESSION ?? null;
+        const result = sendSubagentMessage(
+          { to: params.to, message: params.message },
+          {
+            hasParent: !!sessionFile,
+            ownChildren: runningSubagents.values(),
+            parentRoster: readParentRoster(),
+            selfId: process.env.PI_SUBAGENT_ID ?? "",
+            senderName: process.env.PI_SUBAGENT_NAME ?? "parent",
+            parentMessageFile: sessionFile ? getParentMessageFile(sessionFile) : null,
+          },
+          { prompt: agentPrompt, append: appendParentMessage },
+        );
+
+        if ("error" in result) {
+          return {
+            content: [{ type: "text" as const, text: result.error }],
+            details: { error: result.error },
+          };
+        }
+        return {
+          content: [{ type: "text" as const, text: result.text }],
+          details: {
+            name: result.target.name,
+            pane: result.target.pane,
+            relation: result.target.relation,
+          },
+        };
+      },
+
+      renderCall(args, theme) {
+        const target = typeof args.to === "string" && args.to ? args.to : "(unknown)";
+        return new Text(
+          theme.fg("accent", "▸") +
+            " " +
+            theme.fg("toolTitle", theme.bold(target)) +
+            theme.fg("dim", " — message"),
+          0,
+          0,
+        );
+      },
+
+      renderResult(result, _opts, theme) {
+        const details = result.details as any;
+        if (details?.error) {
+          return new Text(theme.fg("error", `▸ ${details.error}`), 0, 0);
+        }
+        return new Text(
+          theme.fg("accent", "▸") +
+            " " +
+            theme.fg("toolTitle", theme.bold(details?.name ?? "message")) +
+            theme.fg("dim", " — sent"),
+          0,
+          0,
+        );
+      },
+    });
+
   // ── subagents_list tool ──
   if (shouldRegister("subagents_list"))
     pi.registerTool({
@@ -1712,23 +2300,31 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       name: "subagent_resume",
       label: "Resume Subagent",
       description:
-        "Resume a previous sub-agent session in a new multiplexer pane. " +
+        "Resume a previous sub-agent session in a new multiplexer pane or its own tab. " +
         "This is a fire-and-forget async tool: the call returns immediately with only an acknowledgement. " +
         "When the resumed sub-agent finishes, the harness AUTOMATICALLY delivers its result as a steer message that wakes you up and starts a new turn — you do not need to do anything to receive it. " +
         "DO NOT write polling loops, sleep/wait commands, tail/watch scripts, or repeatedly read session/log files to detect completion. DO NOT poll for status. All of that is wasted work — the harness handles delivery for you. " +
         "DO NOT fabricate or assume results. After resuming, either end your turn or work on other independent tasks; the harness will wake you when the result is ready. " +
-        "Use when a sub-agent was cancelled or needs follow-up work.",
+        "Use when a sub-agent was cancelled or needs follow-up work. " +
+        'Placement: optional surface parameter — "pane" (default) splits this pane, "tab" gives the resumed session its own workspace tab; either way keyboard focus stays on this pane (tab placement restores it).',
       promptSnippet:
-        "Resume a previous sub-agent session in a new multiplexer pane. " +
+        "Resume a previous sub-agent session in a new multiplexer pane or its own tab. " +
         "This is a fire-and-forget async tool: the call returns immediately with only an acknowledgement. " +
         "When the resumed sub-agent finishes, the harness AUTOMATICALLY delivers its result as a steer message that wakes you up and starts a new turn — you do not need to do anything to receive it. " +
         "DO NOT write polling loops, sleep/wait commands, tail/watch scripts, or repeatedly read session/log files to detect completion. DO NOT poll for status. All of that is wasted work — the harness handles delivery for you. " +
         "DO NOT fabricate or assume results. After resuming, either end your turn or work on other independent tasks; the harness will wake you when the result is ready. " +
-        "Use when a sub-agent was cancelled or needs follow-up work.",
+        "Use when a sub-agent was cancelled or needs follow-up work. " +
+        'Placement: optional surface parameter — "pane" (default) splits this pane, "tab" gives the resumed session its own workspace tab; either way keyboard focus stays on this pane (tab placement restores it).',
       parameters: Type.Object({
         sessionPath: Type.String({ description: "Path to the session .jsonl file to resume" }),
         name: Type.Optional(
           Type.String({ description: "Display name for the terminal tab. Default: 'Resume'" }),
+        ),
+        surface: Type.Optional(
+          Type.Union([Type.Literal("pane"), Type.Literal("tab")], {
+            description:
+              'Where to open the resumed session: "pane" splits this pane (default), "tab" gives it its own workspace tab with focus returned here. Overrides the configured default for this spawn only.',
+          }),
         ),
         message: Type.Optional(
           Type.String({
@@ -1795,7 +2391,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         // Record entry count before resuming so we can extract new messages
         const entryCountBefore = getNewEntries(params.sessionPath, 0).length;
 
-        const surface = createSurface(name);
+        const surface = createSurface(name, resolveSurfacePlacement(params.surface));
         await new Promise<void>((resolve) => setTimeout(resolve, getShellReadyDelayMs()));
 
         // Build pi resume command
@@ -1809,6 +2405,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         const artifactDir = getArtifactDir(ctx.sessionManager.getSessionDir(), sessionId);
         const activityFile = getSubagentActivityFile(artifactDir, id);
         mkdirSync(dirname(activityFile), { recursive: true });
+        ensureRosterContext(ctx);
 
         let resumeMsgFile: string | undefined;
         if (params.message) {
@@ -1829,17 +2426,15 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         }
 
         // Build env prefix — propagate PI_CODING_AGENT_DIR for config isolation
-        const resumeEnvParts: string[] = [];
-        if (process.env.PI_CODING_AGENT_DIR) {
-          resumeEnvParts.push(`PI_CODING_AGENT_DIR=${shellEscape(process.env.PI_CODING_AGENT_DIR)}`);
-        }
-        resumeEnvParts.push(`PI_SUBAGENT_NAME=${shellEscape(name)}`);
-        resumeEnvParts.push(`PI_SUBAGENT_SESSION=${shellEscape(params.sessionPath)}`);
-        resumeEnvParts.push(`PI_SUBAGENT_ID=${shellEscape(id)}`);
-        resumeEnvParts.push(`PI_SUBAGENT_ACTIVITY_FILE=${shellEscape(activityFile)}`);
-        if (autoExit) {
-          resumeEnvParts.push(`PI_SUBAGENT_AUTO_EXIT=1`);
-        }
+        const resumeEnvParts = buildResumeEnvParts({
+          name,
+          sessionPath: params.sessionPath,
+          id,
+          activityFile,
+          autoExit,
+          codingAgentDir: process.env.PI_CODING_AGENT_DIR,
+          parentRosterFile: rosterContext?.file,
+        });
         const resumeEnvPrefix = resumeEnvParts.join(" ") + " ";
 
         const command = `${resumeEnvPrefix}${parts.join(" ")}; echo '__SUBAGENT_DONE_'$?'__'`;
@@ -1881,6 +2476,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           }),
         };
         runningSubagents.set(id, running);
+        writeRoster();
         startWidgetRefresh();
         startStatusRefresh(pi);
 
@@ -1888,7 +2484,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         const watcherAbort = new AbortController();
         running.abortController = watcherAbort;
 
-        watchSubagent(running, watcherAbort.signal)
+        watchSubagent(running, watcherAbort.signal, pi)
           .then((result) => {
             updateWidget();
 
@@ -2004,6 +2600,32 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       const displayName = agentName[0].toUpperCase() + agentName.slice(1);
       const toolCall = `Use subagent with agent: "${agentName}", name: "${displayName}", task: ${JSON.stringify(taskText)}`;
       pi.sendUserMessage(toolCall);
+    },
+  });
+
+  // /subagent-surface command — show or set the default surface placement
+  pi.registerCommand("subagent-surface", {
+    description: "Show or set the default subagent surface: /subagent-surface [pane|tab]",
+    handler: async (args, ctx) => {
+      const arg = args.trim().toLowerCase();
+      if (arg === "pane" || arg === "tab") {
+        setSurfaceDefault(arg);
+        try {
+          writeSurfaceConfig(arg, surfaceConfigPath);
+          ctx.ui.notify(`Subagent surface set to "${arg}" (saved to config.json).`, "info");
+        } catch (error) {
+          ctx.ui.notify(
+            `Subagent surface set to "${arg}" for this session, but saving to config.json failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+            "warning",
+          );
+        }
+      } else if (arg === "") {
+        ctx.ui.notify(`Subagent surface: ${getSurfaceDefault()}`, "info");
+      } else {
+        ctx.ui.notify(`Subagent surface: ${getSurfaceDefault()} (accepted: pane, tab)`, "warning");
+      }
     },
   });
 

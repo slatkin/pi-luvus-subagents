@@ -1,6 +1,6 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, appendFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -24,6 +24,7 @@ import {
   readScreen,
   sendEscape,
   shellEscape,
+  agentPrompt,
   __pollForExitTest__,
 } from "../pi-extension/subagents/luvus.ts";
 import {
@@ -38,6 +39,9 @@ import {
   observeStatus,
   loadStatusConfig,
   parseStatusConfig,
+  parseSurfaceConfig,
+  loadSurfaceConfig,
+  writeSurfaceConfig,
 } from "../pi-extension/subagents/status.ts";
 import {
   createSubagentActivityRecorder,
@@ -571,6 +575,54 @@ describe("status.ts", () => {
     });
   });
 
+  it("resolves the surface placement default: tab, junk -> pane, absent -> pane", () => {
+    assert.equal(parseSurfaceConfig({ surface: "tab" }), "tab");
+    assert.equal(parseSurfaceConfig({ surface: "pane" }), "pane");
+    assert.equal(parseSurfaceConfig({ surface: "junk" }), "pane");
+    assert.equal(parseSurfaceConfig({}), "pane");
+  });
+
+  it("loads the surface placement from a temp config file", () => {
+    withTempDir((dir) => {
+      const configPath = join(dir, "config.json");
+      const examplePath = join(dir, "config.json.example");
+      writeFileSync(configPath, JSON.stringify({ status: { enabled: true }, surface: "tab" }));
+      assert.equal(loadSurfaceConfig(configPath, examplePath), "tab");
+
+      writeFileSync(configPath, JSON.stringify({ surface: "junk" }));
+      assert.equal(loadSurfaceConfig(configPath, examplePath), "pane");
+
+      assert.equal(loadSurfaceConfig(join(dir, "missing.json"), examplePath), "pane");
+    });
+  });
+
+  it("persists the surface placement while keeping other config keys", () => {
+    withTempDir((dir) => {
+      const configPath = join(dir, "config.json");
+      const examplePath = join(dir, "config.json.example");
+      writeFileSync(configPath, JSON.stringify({ status: { enabled: false } }, null, 2) + "\n");
+
+      writeSurfaceConfig("tab", configPath, examplePath);
+
+      const saved = JSON.parse(readFileSync(configPath, "utf8"));
+      assert.deepEqual(saved, { status: { enabled: false }, surface: "tab" });
+      assert.equal(loadSurfaceConfig(configPath, examplePath), "tab");
+    });
+  });
+
+  it("creates config.json from the shipped example when persisting the surface", () => {
+    withTempDir((dir) => {
+      const configPath = join(dir, "config.json");
+      const examplePath = join(dir, "config.json.example");
+      writeFileSync(examplePath, JSON.stringify({ status: { enabled: true } }, null, 2) + "\n");
+
+      writeSurfaceConfig("pane", configPath, examplePath);
+
+      const saved = JSON.parse(readFileSync(configPath, "utf8"));
+      assert.deepEqual(saved, { status: { enabled: true }, surface: "pane" });
+    });
+  });
+
   it("keeps a missing snapshot as starting until the fixed watchdog threshold", () => {
     let state = createStatusState({ source: "pi", startTimeMs: 0 });
     state = observeStatus(state, { snapshot: "missing" }, 1_000);
@@ -871,6 +923,23 @@ describe("status.ts", () => {
   });
 });
 
+describe("surface placement resolution", () => {
+  it("prefers the tool param over the configured default and ignores invalid values", () => {
+    const saved = subagentsModule.getSurfaceDefault();
+    try {
+      subagentsModule.setSurfaceDefault("tab");
+      assert.equal(subagentsModule.resolveSurfacePlacement(undefined), "tab");
+      assert.equal(subagentsModule.resolveSurfacePlacement("pane"), "pane");
+
+      subagentsModule.setSurfaceDefault("pane");
+      assert.equal(subagentsModule.resolveSurfacePlacement("junk"), "pane");
+      assert.equal(subagentsModule.resolveSurfacePlacement("tab"), "tab");
+    } finally {
+      subagentsModule.setSurfaceDefault(saved);
+    }
+  });
+});
+
 describe("subagent discovery", () => {
   const testApi = (subagentsModule as any).__test__;
 
@@ -1090,7 +1159,7 @@ describe("subagent discovery", () => {
   it("buildSubagentToolAllowlist preserves requested tools and adds child control tools", () => {
     assert.equal(
       testApi.buildSubagentToolAllowlist("read,bash,web_search"),
-      "read,bash,web_search,caller_ping,subagent_done",
+      "read,bash,web_search,caller_ping,subagent_done,subagent_message",
     );
   });
 
@@ -1367,7 +1436,78 @@ describe("commands", () => {
   });
 });
 
+describe("subagent-surface command", () => {
+  function loadCommand() {
+    const { api, registeredCommands } = createMockExtensionApi();
+    (subagentsModule as any).default(api);
+    const command = registeredCommands.find((c: any) => c.name === "subagent-surface");
+    assert.ok(command, "expected /subagent-surface to be registered");
+    const notifications: Array<{ message: string; level: string }> = [];
+    const ctx = {
+      ui: { notify: (message: string, level: string) => notifications.push({ message, level }) },
+    };
+    return { command, notifications, ctx };
+  }
+
+  it("shows the current default with no argument", () => {
+    const { command, notifications, ctx } = loadCommand();
+    command.handler("", ctx);
+    assert.equal(notifications.length, 1);
+    assert.match(notifications[0].message, /^Subagent surface: (pane|tab)$/);
+  });
+
+  it("sets a valid placement, persists it, and reports the new value", () => {
+    withTempDir((dir) => {
+      const configPath = join(dir, "config.json");
+      writeFileSync(configPath, JSON.stringify({ status: { enabled: false } }));
+      (subagentsModule as any).__surfaceTest__.setConfigPath(configPath);
+      const saved = subagentsModule.getSurfaceDefault();
+      try {
+        const { command, notifications, ctx } = loadCommand();
+        command.handler("tab", ctx);
+
+        assert.equal(subagentsModule.getSurfaceDefault(), "tab");
+        assert.equal(notifications[0].level, "info");
+        assert.match(notifications[0].message, /set to "tab" \(saved to config\.json\)/);
+        assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")), {
+          status: { enabled: false },
+          surface: "tab",
+        });
+      } finally {
+        (subagentsModule as any).__surfaceTest__.setConfigPath(undefined);
+        subagentsModule.setSurfaceDefault(saved);
+      }
+    });
+  });
+
+  it("keeps the default and explains accepted values on an invalid argument", () => {
+    const saved = subagentsModule.getSurfaceDefault();
+    const { command, notifications, ctx } = loadCommand();
+    try {
+      command.handler("window", ctx);
+      assert.equal(subagentsModule.getSurfaceDefault(), saved);
+      assert.equal(notifications[0].level, "warning");
+      assert.match(notifications[0].message, /accepted: pane, tab/);
+    } finally {
+      subagentsModule.setSurfaceDefault(saved);
+    }
+  });
+});
+
 describe("tool registration", () => {
+  it("registers the optional surface parameter on subagent and subagent_resume", () => {
+    const { api, registeredTools } = createMockExtensionApi();
+    (subagentsModule as any).default(api);
+
+    for (const toolName of ["subagent", "subagent_resume"]) {
+      const tool = registeredTools.find((t: any) => t.name === toolName);
+      assert.ok(tool, `expected ${toolName} to be registered`);
+      assert.ok(tool.parameters.properties.surface, `${toolName} should accept surface`);
+      assert.match(tool.description, /surface parameter/);
+      assert.match(tool.promptSnippet, /surface parameter/);
+    }
+  });
+
   it("defaults resumed subagents to auto-exit and non-interactive tracking", () => {
     const testApi = (subagentsModule as any).__test__;
 
@@ -1898,6 +2038,329 @@ describe("subagent interruption", () => {
   });
 });
 
+describe("subagent messaging", () => {
+  const testApi = () => (subagentsModule as any).__test__;
+
+  function makeRunning(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "a1",
+      name: "Worker",
+      task: "",
+      surface: "pane-1",
+      startTime: 0,
+      sessionFile: "worker.jsonl",
+      interactive: false,
+      statusState: createStatusState({ source: "pi", startTimeMs: 0 }),
+      ...overrides,
+    };
+  }
+
+  it("registers subagent_message in the main session extension", () => {
+    const { api, registeredTools } = createMockExtensionApi();
+    (subagentsModule as any).default(api);
+    assert.equal(registeredTools.some((tool) => tool.name === "subagent_message"), true);
+  });
+
+  it("builds the roster from the running map after add and remove", () => {
+    const runningMap = testApi().runningSubagents as Map<string, any>;
+    runningMap.clear();
+    withTempDir((dir) => {
+      const file = join(dir, "subagent-roster.json");
+      try {
+        testApi().setRosterContext({ file, parentPane: "21", parentName: "parent" });
+        runningMap.set("a1", makeRunning({ id: "a1", name: "Worker", surface: "24" }));
+        runningMap.set("b2", makeRunning({ id: "b2", name: "Scout", surface: "25", cli: "claude" }));
+        testApi().writeRoster();
+
+        let roster = JSON.parse(readFileSync(file, "utf8"));
+        assert.deepEqual(roster.children, [
+          { id: "a1", name: "Worker", pane: "24", cli: "pi" },
+          { id: "b2", name: "Scout", pane: "25", cli: "claude" },
+        ]);
+
+        runningMap.delete("a1");
+        testApi().writeRoster();
+        roster = JSON.parse(readFileSync(file, "utf8"));
+        assert.deepEqual(roster.children, [{ id: "b2", name: "Scout", pane: "25", cli: "claude" }]);
+      } finally {
+        testApi().setRosterContext(null);
+        runningMap.clear();
+      }
+    });
+  });
+
+  it("includes PI_SUBAGENT_PARENT_ROSTER in both spawn and resume env builders", () => {
+    const expected = "PI_SUBAGENT_PARENT_ROSTER='/s/artifacts/parent/subagent-roster.json'";
+    const spawn = testApi().buildSpawnEnvParts({
+      name: "Worker",
+      subagentSessionFile: "/s/worker.jsonl",
+      id: "a1",
+      activityFile: "/s/a1.activity.json",
+      surface: "24",
+      denySet: new Set(),
+      parentRosterFile: "/s/artifacts/parent/subagent-roster.json",
+    });
+    assert.equal(spawn.includes(expected), true);
+
+    const resume = testApi().buildResumeEnvParts({
+      name: "Worker",
+      sessionPath: "/s/worker.jsonl",
+      id: "a1",
+      activityFile: "/s/a1.activity.json",
+      autoExit: true,
+      parentRosterFile: "/s/artifacts/parent/subagent-roster.json",
+    });
+    assert.equal(resume.includes(expected), true);
+  });
+
+  it("resolves parent, children and siblings and excludes self", () => {
+    // From Reviewer's perspective: Worker is a sibling, Scout is its own child.
+    const base = {
+      hasParent: true,
+      ownChildren: [{ id: "d4", name: "Scout", surface: "27" }],
+      parentRoster: {
+        parentPane: "21",
+        parentName: "parent",
+        children: [
+          { id: "b2", name: "Reviewer", pane: "25", cli: "pi" },
+          { id: "c3", name: "Worker", pane: "26", cli: "pi" },
+        ],
+      },
+      selfId: "b2",
+    };
+
+    assert.deepEqual(testApi().resolveMessageTarget({ ...base, to: "parent" }), {
+      target: { relation: "parent", name: "parent" },
+    });
+    assert.deepEqual(testApi().resolveMessageTarget({ ...base, to: "Scout" }), {
+      target: { relation: "child", id: "d4", name: "Scout", pane: "27" },
+    });
+    assert.deepEqual(testApi().resolveMessageTarget({ ...base, to: "Worker" }), {
+      target: { relation: "sibling", id: "c3", name: "Worker", pane: "26" },
+    });
+    assert.match(testApi().resolveMessageTarget({ ...base, to: "Reviewer" }).error, /No reachable agent/);
+  });
+
+  it("lists reachable names for a finished target and reports ambiguity with ids", () => {
+    const base = {
+      hasParent: true,
+      ownChildren: [{ id: "d4", name: "Scout", surface: "27" }],
+      parentRoster: {
+        parentPane: "21",
+        parentName: "parent",
+        children: [{ id: "b2", name: "Worker", pane: "25", cli: "pi" }],
+      },
+      selfId: "x9",
+    };
+
+    const unknown = testApi().resolveMessageTarget({ ...base, to: "Finished" });
+    assert.match(unknown.error, /Reachable: parent, Scout, Worker/);
+
+    const ambiguous = testApi().resolveMessageTarget({
+      ...base,
+      ownChildren: [
+        { id: "d4", name: "Scout", surface: "27" },
+        { id: "e5", name: "Scout", surface: "28" },
+      ],
+      to: "Scout",
+    });
+    assert.match(ambiguous.error, /Ambiguous subagent name "Scout".+Scout \[d4\].+Scout \[e5\]/);
+
+    assert.equal(testApi().resolveMessageTarget({ ...base, to: "d4" }).target.id, "d4");
+  });
+
+  it("lists reachable names when ownChildren is a one-shot Map iterator", () => {
+    // Regression: resolveMessageTarget must not consume the iterator while
+    // matching and then find it empty when building the error.
+    const running = new Map<string, any>();
+    running.set("d4", { id: "d4", name: "Scout", surface: "27", cli: "pi" });
+
+    const result = testApi().resolveMessageTarget({
+      hasParent: false,
+      ownChildren: running.values(),
+      parentRoster: null,
+      selfId: "",
+      to: "Finished",
+    });
+
+    assert.match(result.error, /Reachable: Scout/);
+  });
+
+  it("reports no parent for a top-level agent", () => {
+    const result = testApi().resolveMessageTarget({
+      hasParent: false,
+      ownChildren: [],
+      parentRoster: null,
+      selfId: "",
+      to: "parent",
+    });
+    assert.match(result.error, /no parent/);
+  });
+
+  it("builds the sender header for each relation", () => {
+    assert.equal(
+      testApi().formatMessageHeader({ senderName: "Worker", targetRelation: "parent" }),
+      "[subagent message from Worker (child)]",
+    );
+    assert.equal(
+      testApi().formatMessageHeader({ senderName: "parent", targetRelation: "child" }),
+      "[subagent message from parent]",
+    );
+    assert.equal(
+      testApi().formatMessageHeader({ senderName: "Worker", targetRelation: "sibling" }),
+      "[subagent message from Worker (sibling)]",
+    );
+  });
+
+  it("rejects an empty message without delivering", () => {
+    let prompted = false;
+    let appended = false;
+    const result = testApi().sendSubagentMessage(
+      { to: "parent", message: "  " },
+      {
+        hasParent: true,
+        ownChildren: [],
+        parentRoster: null,
+        selfId: "a1",
+        senderName: "Worker",
+        parentMessageFile: "/tmp/worker.jsonl.msg",
+      },
+      {
+        prompt: () => {
+          prompted = true;
+        },
+        append: () => {
+          appended = true;
+        },
+      },
+    );
+    assert.match(result.error, /must not be empty/);
+    assert.equal(prompted, false);
+    assert.equal(appended, false);
+  });
+
+  it("delivers parent-bound messages through the message file, never agentPrompt", () => {
+    const appended: Array<{ file: string; payload: any }> = [];
+    const prompted: string[] = [];
+    const result = testApi().sendSubagentMessage(
+      { to: "parent", message: "Which DB driver?" },
+      {
+        hasParent: true,
+        ownChildren: [],
+        parentRoster: null,
+        selfId: "a1",
+        senderName: "Worker",
+        parentMessageFile: "/s/worker.jsonl.msg",
+      },
+      {
+        prompt: (pane: string, text: string) => prompted.push(`${pane}:${text}`),
+        append: (file: string, payload: any) => appended.push({ file, payload }),
+      },
+    );
+
+    assert.equal("ok" in result, true);
+    assert.equal(prompted.length, 0);
+    assert.deepEqual(appended, [
+      {
+        file: "/s/worker.jsonl.msg",
+        payload: {
+          header: "[subagent message from Worker (child)]",
+          message: "Which DB driver?",
+        },
+      },
+    ]);
+  });
+
+  it("delivers child and sibling messages through Luvus with the header", () => {
+    const prompted: string[] = [];
+    const result = testApi().sendSubagentMessage(
+      { to: "Reviewer", message: "API is in src/api" },
+      {
+        hasParent: true,
+        ownChildren: [{ id: "b2", name: "Reviewer", surface: "25" }],
+        parentRoster: null,
+        selfId: "a1",
+        senderName: "parent",
+        parentMessageFile: null,
+      },
+      {
+        prompt: (pane: string, text: string) => prompted.push(`${pane}\u0000${text}`),
+        append: () => {},
+      },
+    );
+
+    assert.equal("ok" in result, true);
+    assert.deepEqual(prompted, ["25\u0000[subagent message from parent]\nAPI is in src/api"]);
+  });
+
+  it("registers subagent_message with a validated schema", () => {
+    const { api, registeredTools } = createMockExtensionApi();
+    (subagentsModule as any).default(api);
+    const tool = registeredTools.find((t) => t.name === "subagent_message");
+    assert.ok(tool, "expected subagent_message to be registered");
+    assert.equal(tool.parameters.properties.to.type, "string");
+    assert.equal(tool.parameters.properties.message.type, "string");
+  });
+
+  it("holds a partial trailing message-file line until its newline arrives", () => {
+    withTempDir((dir) => {
+      const file = join(dir, "worker.jsonl.msg");
+      appendFileSync(
+        file,
+        JSON.stringify({ header: "[subagent message from Worker (child)]", message: "one" }) + "\n",
+      );
+      appendFileSync(file, '{"header":"[subagent message from Worker (child)]","message":"two');
+
+      const first = testApi().readParentMessages(file, 0);
+      assert.equal(first.messages.length, 1);
+      assert.equal(first.messages[0].message, "one");
+
+      appendFileSync(file, '"}\n');
+      const second = testApi().readParentMessages(file, first.offset);
+      assert.equal(second.messages.length, 1);
+      assert.equal(second.messages[0].message, "two");
+    });
+  });
+
+  it("drains a message written just before exit, then removes the file", () => {
+    withTempDir((dir) => {
+      const sessionFile = join(dir, "worker.jsonl");
+      writeFileSync(sessionFile, "");
+      const msgFile = `${sessionFile}.msg`;
+      appendFileSync(
+        msgFile,
+        JSON.stringify({ header: "[subagent message from Worker (child)]", message: "bye" }) + "\n",
+      );
+      // The child exits immediately after writing the message.
+      writeFileSync(`${sessionFile}.exit`, JSON.stringify({ type: "done" }));
+
+      const { api, sentMessages } = createMockExtensionApi();
+      testApi().drainAndRemoveParentMessages(makeRunning({ sessionFile }), api);
+
+      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages[0].message.content, "[subagent message from Worker (child)]\nbye");
+      assert.deepEqual(sentMessages[0].options, { triggerTurn: true, deliverAs: "steer" });
+      assert.equal(existsSync(msgFile), false);
+    });
+  });
+
+  it("names parent and running siblings in the launch prompt", () => {
+    const hint = testApi().buildLaunchMessagingHint(["Worker"]);
+    assert.match(hint, /`parent`/);
+    assert.match(hint, /`Worker`/);
+
+    const prompt = testApi().buildSubagentTaskPrompt({
+      task: "do the thing",
+      roleBlock: "role",
+      modeHint: "Complete your task autonomously.",
+      summaryInstruction: "Summarize.",
+      messagingHint: hint,
+      inheritsConversationContext: false,
+    });
+    assert.match(prompt, /You can message `parent`, `Worker` with subagent_message/);
+  });
+});
+
 describe("subagent status renderer", () => {
   function createTheme() {
     return {
@@ -2138,6 +2601,10 @@ case "$LUVUS_STUB_MODE" in
     echo '{"id":"1","result":{"revision":1,"type":"pane"}}'
     exit 0
     ;;
+  not-ready)
+    echo '{"error":{"code":"agent_not_ready","message":"agent_not_ready: target is showing a blocked prompt"}}'
+    exit 0
+    ;;
 esac
 case "$1 $2" in
   "pane split")
@@ -2145,6 +2612,30 @@ case "$1 $2" in
     ;;
   "pane read")
     echo '{"id":"1","result":{"revision":1,"text":"l1\\nl2\\nl3\\nl4\\nl5\\nl6\\nl7\\nl8","type":"pane_read"}}'
+    ;;
+  "agent prompt")
+    echo '{"id":"1","result":{"pane":"24","submitted":true,"evidence":"queued","status":"idle","type":"agent_prompt"}}'
+    ;;
+  "agent list")
+    if [ "$LUVUS_STUB_MODE" = "no-caller" ]; then
+      echo '{"id":"1","result":{"agents":[{"pane":"99","tab":"2","type":"agent"}],"type":"agent_list"}}'
+    else
+      echo '{"id":"1","result":{"agents":[{"pane":"21","tab":"1","focused":true,"type":"agent"}],"type":"agent_list"}}'
+    fi
+    ;;
+  "pane move")
+    if [ "$LUVUS_STUB_MODE" = "move-error" ]; then
+      echo '{"error":{"code":"boom","message":"stub move exploded"}}'
+    else
+      echo '{"id":"1","result":{"pane":"24","revision":2,"tab":"3","type":"pane_move","workspace":"1"}}'
+    fi
+    ;;
+  "tab focus")
+    if [ "$LUVUS_STUB_MODE" = "focus-error" ]; then
+      echo '{"error":{"code":"boom","message":"stub focus exploded"}}'
+    else
+      echo '{"id":"1","result":{"revision":3,"type":"ok"}}'
+    fi
     ;;
   *)
     echo '{"id":"1","result":{"revision":1,"type":"ok"}}'
@@ -2238,6 +2729,87 @@ esac
     );
   });
 
+  it("createSurface tab placement looks up the caller tab, moves the pane, and restores focus", () => {
+    const log = join(stubDir, "calls-tab.log");
+    const surface = withLuvusEnv(
+      allLuvusKeys({ LUVUS_ENV: "1", LUVUS_BIN_PATH: stubPath, LUVUS_PANE_ID: "21", LUVUS_STUB_LOG: log }),
+      () => createSurface("Scout", "tab"),
+    );
+    assert.equal(surface, "24");
+    assert.deepEqual(readFileSync(log, "utf8").trim().split("\n"), [
+      "agent list",
+      "pane split 21 --no-focus",
+      "pane name scout --pane 24",
+      "pane move 24 --new-tab",
+      "tab focus 1",
+    ]);
+  });
+
+  it("createSurface tab placement keeps pane placement when the caller tab is unknown", () => {
+    const log = join(stubDir, "calls-nocaller.log");
+    const surface = withLuvusEnv(
+      allLuvusKeys({
+        LUVUS_ENV: "1",
+        LUVUS_BIN_PATH: stubPath,
+        LUVUS_PANE_ID: "21",
+        LUVUS_STUB_LOG: log,
+        LUVUS_STUB_MODE: "no-caller",
+      }),
+      () => createSurface("Scout", "tab"),
+    );
+    assert.equal(surface, "24");
+    const calls = readFileSync(log, "utf8").trim().split("\n");
+    assert.ok(calls.includes("agent list"));
+    assert.ok(!calls.some((call) => call.startsWith("pane move")));
+    assert.ok(!calls.some((call) => call.startsWith("tab focus")));
+  });
+
+  it("createSurface tab placement keeps the pane when the move fails and skips focus restore", () => {
+    const log = join(stubDir, "calls-moveerr.log");
+    const surface = withLuvusEnv(
+      allLuvusKeys({
+        LUVUS_ENV: "1",
+        LUVUS_BIN_PATH: stubPath,
+        LUVUS_PANE_ID: "21",
+        LUVUS_STUB_LOG: log,
+        LUVUS_STUB_MODE: "move-error",
+      }),
+      () => createSurface("Scout", "tab"),
+    );
+    assert.equal(surface, "24");
+    const calls = readFileSync(log, "utf8").trim().split("\n");
+    assert.ok(calls.includes("pane move 24 --new-tab"));
+    assert.ok(!calls.some((call) => call.startsWith("tab focus")));
+  });
+
+  it("createSurface tab placement still succeeds when focus restore fails", () => {
+    const log = join(stubDir, "calls-focuserr.log");
+    const surface = withLuvusEnv(
+      allLuvusKeys({
+        LUVUS_ENV: "1",
+        LUVUS_BIN_PATH: stubPath,
+        LUVUS_PANE_ID: "21",
+        LUVUS_STUB_LOG: log,
+        LUVUS_STUB_MODE: "focus-error",
+      }),
+      () => createSurface("Scout", "tab"),
+    );
+    assert.equal(surface, "24");
+    const calls = readFileSync(log, "utf8").trim().split("\n");
+    assert.ok(calls.includes("pane move 24 --new-tab"));
+    assert.ok(calls.includes("tab focus 1"));
+  });
+
+  it("createSurface pane placement never calls agent list", () => {
+    const log = join(stubDir, "calls-plainpane.log");
+    withLuvusEnv(
+      allLuvusKeys({ LUVUS_ENV: "1", LUVUS_BIN_PATH: stubPath, LUVUS_PANE_ID: "21", LUVUS_STUB_LOG: log }),
+      () => createSurface("Scout", "pane"),
+    );
+    const calls = readFileSync(log, "utf8").trim().split("\n");
+    assert.deepEqual(calls, ["pane split 21 --no-focus", "pane name scout --pane 24"]);
+  });
+
   it("surfaces the Luvus .error message as an Error", () => {
     assert.throws(
       () =>
@@ -2264,5 +2836,38 @@ esac
       () => sendEscape("24"),
     );
     assert.deepEqual(readFileSync(log, "utf8").trim().split("\n"), ["agent keys 24 esc"]);
+  });
+
+  it("agentPrompt sends `agent prompt` without --wait and unwraps the queued answer", () => {
+    const log = join(stubDir, "calls-prompt.log");
+    const result = withLuvusEnv(
+      allLuvusKeys({ LUVUS_ENV: "1", LUVUS_BIN_PATH: stubPath, LUVUS_PANE_ID: "21", LUVUS_STUB_LOG: log }),
+      () => agentPrompt("24", "hello"),
+    ) as { submitted?: boolean; evidence?: string; pane?: string };
+    assert.equal(result.submitted, true);
+    assert.equal(result.evidence, "queued");
+    assert.equal(result.pane, "24");
+    const calls = readFileSync(log, "utf8").trim().split("\n");
+    assert.deepEqual(calls, ["agent prompt 24 hello"]);
+    assert.equal(calls.join("\n").includes("--wait"), false);
+  });
+
+  it("agentPrompt surfaces agent_not_ready without retrying", () => {
+    const log = join(stubDir, "calls-prompt-notready.log");
+    assert.throws(
+      () =>
+        withLuvusEnv(
+          allLuvusKeys({
+            LUVUS_ENV: "1",
+            LUVUS_BIN_PATH: stubPath,
+            LUVUS_PANE_ID: "21",
+            LUVUS_STUB_MODE: "not-ready",
+            LUVUS_STUB_LOG: log,
+          }),
+          () => agentPrompt("24", "hi"),
+        ),
+      /agent_not_ready/,
+    );
+    assert.deepEqual(readFileSync(log, "utf8").trim().split("\n"), ["agent prompt 24 hi"]);
   });
 });

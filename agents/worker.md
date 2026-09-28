@@ -102,3 +102,7 @@ Load the commit skill and make a polished, descriptive commit:
 ```
 todo(action: "update", id: "TODO-xxxx", status: "closed")
 ```
+
+## Talking to other agents
+
+Use `subagent_message` to talk to `parent`, a running child, or a running sibling without ending your session. `caller_ping` and `subagent_done` end it.

@@ -149,3 +149,7 @@ The bar for flagging is HIGH. Ask: "Will this actually cause a real problem?"
 ### Output
 
 If the code works and is readable, a short review with few findings is the RIGHT answer. Don't manufacture findings.
+
+## Talking to other agents
+
+Use `subagent_message` to talk to `parent`, a running child, or a running sibling without ending your session. `caller_ping` and `subagent_done` end it.
