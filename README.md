@@ -45,7 +45,7 @@ Subagent panes are created without stealing keyboard focus (`pane split --no-foc
 
 ### Extensions
 
-**Subagents** — 5 main-session tools + 3 commands, plus 1 subagent-only tool:
+**Subagents** — 5 main-session tools + 4 commands, plus 2 subagent-only tools (`caller_ping`, `subagent_done`):
 
 | Tool                 | Description                                                                                  |
 | -------------------- | -------------------------------------------------------------------------------------------- |
@@ -64,13 +64,14 @@ Subagent panes are created without stealing keyboard focus (`pane split --no-foc
 
 ### Bundled Agents
 
-| Agent             | Model                  | Role                                                                                     |
-| ----------------- | ---------------------- | ---------------------------------------------------------------------------------------- |
-| **planner**       | Opus (medium thinking) | Brainstorming — clarifies requirements, explores approaches, writes plans, creates todos |
-| **scout**         | Haiku                  | Fast codebase reconnaissance — maps files, patterns, conventions                         |
-| **worker**        | Sonnet                 | Implements tasks from todos — writes code, runs tests, makes polished commits            |
-| **reviewer**      | Opus (medium thinking) | Reviews code for bugs, security issues, correctness                                      |
-| **visual-tester** | Sonnet                 | Visual QA via Chrome CDP — screenshots, responsive testing, interaction testing          |
+| Agent             | Model                       | Role                                                                                     |
+| ----------------- | --------------------------- | ---------------------------------------------------------------------------------------- |
+| **claude-code**   | Claude Code CLI (`sonnet`)  | Self-driving Claude Code session for deep investigation, experimentation, code exploration |
+| **planner**       | Opus (medium thinking)      | Brainstorming — clarifies requirements, explores approaches, writes plans, creates todos |
+| **scout**         | Haiku                       | Fast codebase reconnaissance — maps files, patterns, conventions                         |
+| **worker**        | Sonnet (minimal thinking)   | Implements tasks from todos — writes code, runs tests, makes polished commits            |
+| **reviewer**      | Opus (medium thinking)      | Reviews code for bugs, security issues, correctness                                      |
+| **visual-tester** | Sonnet                      | Visual QA via Chrome CDP — screenshots, responsive testing, interaction testing          |
 
 Agent discovery follows priority: **project-local** (`.pi/agents/`) > **global** (`~/.pi/agent/agents/`) > **package-bundled**. Override any bundled agent by placing your own version in the higher-priority location.
 
@@ -226,6 +227,7 @@ The `caller_ping` tool lets a subagent request help from its parent agent. When 
 - `name` (optional): Display name for the resumed pane (defaults to `Resume`)
 - `message` (optional): Follow-up prompt to send after resuming
 - `autoExit` (optional): Whether the resumed session should auto-exit after its next response. Defaults to `true` for autonomous follow-up work; set `false` when resuming for an interactive handoff.
+- `surface` (optional): `"pane"` (default) splits the caller's pane; `"tab"` opens the resumed session in its own workspace tab. Overrides the `surface` key in `config.json` for this resume.
 
 **Interaction flow:**
 1. Child calls `caller_ping({ message: "Not sure which schema to use" })`
@@ -462,11 +464,11 @@ spawning: false
 
 ## Tools Widget
 
-Every sub-agent session displays a compact tools widget showing available and denied tools. Toggle with `Ctrl+J`:
+Every sub-agent session displays a compact tools widget showing available and denied tools. Toggle with `n`:
 
 ```
-[scout] — 12 tools · 4 denied  (Ctrl+J)              ← collapsed
-[scout] — 12 available  (Ctrl+J to collapse)          ← expanded
+[scout] — 12 tools · 4 denied  (n)              ← collapsed
+[scout] — 12 available  (n to collapse)          ← expanded
   read, bash, edit, write, todo, ...
   denied: subagent, subagents_list, ...
 ```
