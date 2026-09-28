@@ -1,7 +1,7 @@
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { keyHint } from "@mariozechner/pi-coding-agent";
+import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { keyHint } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "@sinclair/typebox";
-import { Box, Text, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { Box, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -21,13 +21,10 @@ import {
   sendLongCommand,
   pollForExit,
   closeSurface,
-  getMuxBackend,
   sendEscape,
   shellEscape,
-  renameCurrentTab,
-  renameWorkspace,
   readScreen,
-} from "./cmux.ts";
+} from "./luvus.ts";
 
 import {
   findLastAssistantMessage,
@@ -398,7 +395,7 @@ function muxUnavailableResult() {
     content: [
       {
         type: "text" as const,
-        text: `Subagents require a supported terminal multiplexer. ${muxSetupHint()}`,
+        text: `Subagents require Luvus. ${muxSetupHint()}`,
       },
     ],
     details: { error: "mux not available" },
@@ -722,11 +719,11 @@ function observeRunningSubagent(running: RunningSubagent, observedAt = Date.now(
     ? readSubagentActivityFile(activityFile, running.id)
     : { ok: false, reason: "missing" };
 
-  running.activityRead = read.ok
+  running.activityRead = read.ok === true
     ? { ok: true }
     : { ok: false, reason: read.reason, error: read.error };
 
-  if (read.ok) {
+  if (read.ok === true) {
     running.activity = read.activity;
     running.statusState = observeStatus(running.statusState, {
       snapshot: "present",
@@ -781,10 +778,9 @@ function requestSubagentInterrupt(
     sendEscapeKey(running.surface);
     return { ok: true };
   } catch (error: any) {
-    const backend = getMuxBackend() ?? "unknown";
     return {
       error:
-        `Failed to send Escape to subagent "${running.name}" via ${backend}: ` +
+        `Failed to send Escape to subagent "${running.name}" via Luvus: ` +
         `${error?.message ?? String(error)}`,
     };
   }
@@ -1592,7 +1588,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         }
 
         // Fallback (shouldn't happen)
-        const text = typeof result.content[0]?.text === "string" ? result.content[0].text : "";
+        const first = result.content[0];
+        const text = first?.type === "text" ? first.text : "";
         return new Text(theme.fg("dim", text), 0, 0);
       },
     });
@@ -1615,7 +1612,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         name: Type.Optional(Type.String({ description: "Exact running subagent display name" })),
       }),
 
-      async execute(_toolCallId, params) {
+      async execute(
+        _toolCallId,
+        params,
+      ): Promise<AgentToolResult<{ error?: string; id?: string; name?: string; status?: string }>> {
         return handleSubagentInterrupt(params);
       },
 
@@ -1644,7 +1644,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           );
         }
 
-        const text = typeof result.content[0]?.text === "string" ? result.content[0].text : "";
+        const first = result.content[0];
+        const text = first?.type === "text" ? first.text : "";
         return new Text(theme.fg("dim", text), 0, 0);
       },
     });
@@ -1767,7 +1768,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         }
 
         // Fallback
-        const text = typeof result.content[0]?.text === "string" ? result.content[0].text : "";
+        const first = result.content[0];
+        const text = first?.type === "text" ? first.text : "";
         return new Text(theme.fg("dim", text), 0, 0);
       },
 
@@ -2011,6 +2013,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     if (!details) return undefined;
 
     return {
+      invalidate() {},
       render(width: number): string[] {
         const name = details.name ?? "subagent";
         const exitCode = details.exitCode ?? 0;
@@ -2091,6 +2094,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     if (lines.length === 0 && overflow === 0) return undefined;
 
     return {
+      invalidate() {},
       render(width: number): string[] {
         const lineWidth = Math.max(0, width - 6);
         const contentLines = [
@@ -2118,6 +2122,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     if (!details) return undefined;
 
     return {
+      invalidate() {},
       render(width: number): string[] {
         const name = details.name ?? "subagent";
         const agentTag = details.agent ? theme.fg("dim", ` (${details.agent})`) : "";
@@ -2156,17 +2161,6 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       if (!task) {
         ctx.ui.notify("Usage: /plan <what to build>", "warning");
         return;
-      }
-
-      // Rename workspace and tab to show this is a planning session
-      if (isMuxAvailable()) {
-        try {
-          const label = task.length > 40 ? task.slice(0, 40) + "..." : task;
-          renameWorkspace(`🎯 ${label}`);
-          renameCurrentTab(`🎯 Plan: ${label}`);
-        } catch {
-          // non-critical -- do not block the plan
-        }
       }
 
       // Load the plan skill from the subagents extension directory

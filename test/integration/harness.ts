@@ -1,14 +1,15 @@
 /**
- * Integration test harness for pi-interactive-subagents.
+ * Integration test harness for pi-luvus-subagents.
  *
  * Provides utilities to:
- * - Detect available mux backends (cmux, tmux, zellij)
+ * - Detect the Luvus environment (LUVUS_ENV / LUVUS_BIN_PATH / LUVUS_PANE_ID)
  * - Create isolated test environments with test agent definitions
- * - Start real pi sessions in mux surfaces
+ * - Start real pi sessions in Luvus panes
  * - Poll for file creation and screen output
- * - Clean up surfaces and temp files after tests
+ * - Clean up panes and temp files after tests
+ *
+ * Tests skip unless run inside a Luvus pane (`LUVUS_ENV` set).
  */
-import { execFileSync } from "node:child_process";
 import {
   mkdtempSync,
   mkdirSync,
@@ -23,34 +24,27 @@ import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import {
-  getMuxBackend,
   createSurface,
-  createSurfaceSplit,
-  sendCommand,
   sendLongCommand,
   readScreen,
   readScreenAsync,
   closeSurface,
   sendEscape,
   shellEscape,
-  parseCmuxFocusedSnapshotFromJson,
-  parseCmuxPaneRefForSurfaceFromJson,
-  type MuxBackend,
-} from "../../pi-extension/subagents/cmux.ts";
+  isMuxAvailable,
+} from "../../pi-extension/subagents/luvus.ts";
 
-// Re-export mux primitives for tests
+// Re-export Luvus primitives for tests
 export {
   createSurface,
-  createSurfaceSplit,
-  sendCommand,
   sendLongCommand,
   readScreen,
   readScreenAsync,
   closeSurface,
   sendEscape,
   shellEscape,
+  isMuxAvailable,
 };
-export type { MuxBackend };
 
 // ── Paths ──
 
@@ -79,103 +73,14 @@ export const TEST_MODEL = process.env.PI_TEST_MODEL ?? "anthropic/claude-haiku-4
 /** Per-test timeout in ms. Override with PI_TEST_TIMEOUT env var. */
 export const PI_TIMEOUT = Number(process.env.PI_TEST_TIMEOUT ?? "120000");
 
-// ── Backend detection ──
+// ── Environment detection ──
 
 /**
- * Detect which mux backends are actually available in the current environment.
- * Temporarily sets PI_SUBAGENT_MUX to probe each backend.
+ * True when the tests run inside a Luvus pane (all three LUVUS_* env vars
+ * set). Integration tests skip elsewhere.
  */
-export function getAvailableBackends(): MuxBackend[] {
-  const backends: MuxBackend[] = [];
-  const orig = process.env.PI_SUBAGENT_MUX;
-
-  for (const backend of ["cmux", "tmux", "zellij"] as MuxBackend[]) {
-    process.env.PI_SUBAGENT_MUX = backend;
-    try {
-      if (getMuxBackend() === backend) backends.push(backend);
-    } catch {}
-  }
-
-  if (orig === undefined) delete process.env.PI_SUBAGENT_MUX;
-  else process.env.PI_SUBAGENT_MUX = orig;
-
-  return backends;
-}
-
-export function setBackend(backend: MuxBackend): string | undefined {
-  const prev = process.env.PI_SUBAGENT_MUX;
-  process.env.PI_SUBAGENT_MUX = backend;
-  return prev;
-}
-
-export function restoreBackend(prev: string | undefined): void {
-  if (prev === undefined) delete process.env.PI_SUBAGENT_MUX;
-  else process.env.PI_SUBAGENT_MUX = prev;
-}
-
-export function focusSurface(backend: MuxBackend, surface: string): void {
-  if (backend === "cmux") {
-    const pane = getSurfacePane(backend, surface);
-    if (pane) execFileSync("cmux", ["focus-pane", "--pane", pane], { encoding: "utf8" });
-    execFileSync("cmux", ["focus-panel", "--panel", surface], { encoding: "utf8" });
-    return;
-  }
-
-  if (backend === "tmux") {
-    execFileSync("tmux", ["select-pane", "-t", surface], { encoding: "utf8" });
-    return;
-  }
-
-  throw new Error(`Focus helpers are not implemented for ${backend}`);
-}
-
-export function getFocusedSurface(backend: MuxBackend): string | null {
-  if (backend === "cmux") {
-    const info = execFileSync("cmux", ["identify", "--json"], { encoding: "utf8" });
-    return parseCmuxFocusedSnapshotFromJson(info)?.surfaceRef ?? null;
-  }
-
-  if (backend === "tmux") {
-    try {
-      const panes = execFileSync("tmux", ["list-panes", "-F", "#{pane_id} #{pane_active}"], {
-        encoding: "utf8",
-      });
-      const activeLine = panes.split("\n").find((line) => line.endsWith(" 1"));
-      return activeLine?.split(" ")[0] ?? null;
-    } catch {
-      return null;
-    }
-  }
-
-  throw new Error(`Focus helpers are not implemented for ${backend}`);
-}
-
-export function getSurfacePane(backend: MuxBackend, surface: string): string | null {
-  if (backend === "cmux") {
-    const info = execFileSync("cmux", ["identify", "--surface", surface], { encoding: "utf8" });
-    return parseCmuxPaneRefForSurfaceFromJson(info, surface);
-  }
-
-  if (backend === "tmux") return surface;
-
-  throw new Error(`Pane lookup is not implemented for ${backend}`);
-}
-
-export async function waitForFocusedSurface(
-  backend: MuxBackend,
-  surface: string,
-  timeout: number = PI_TIMEOUT,
-): Promise<void> {
-  const start = Date.now();
-  while (Date.now() - start < timeout) {
-    if (getFocusedSurface(backend) === surface) return;
-    await sleep(200);
-  }
-
-  throw new Error(
-    `Timeout (${timeout}ms) waiting for focused ${backend} surface ${surface}; ` +
-      `current focus is ${getFocusedSurface(backend) ?? "unknown"}`,
-  );
+export function luvusAvailable(): boolean {
+  return isMuxAvailable();
 }
 
 // ── Test environment ──
@@ -183,9 +88,7 @@ export async function waitForFocusedSurface(
 export interface TestEnv {
   /** Temp directory serving as the test project root */
   dir: string;
-  /** Active mux backend for this test run */
-  backend: MuxBackend;
-  /** Surfaces created during the test (cleaned up automatically) */
+  /** Panes created during the test (cleaned up automatically) */
   surfaces: string[];
   /** Temp files to clean up */
   tempFiles: string[];
@@ -195,7 +98,7 @@ export interface TestEnv {
  * Create an isolated test environment with test agent definitions.
  * The temp dir has `.pi/agents/` containing copies of all test agents.
  */
-export function createTestEnv(backend: MuxBackend): TestEnv {
+export function createTestEnv(): TestEnv {
   const dir = mkdtempSync(join(tmpdir(), "pi-integ-"));
   const agentsDir = join(dir, ".pi", "agents");
   mkdirSync(agentsDir, { recursive: true });
@@ -209,7 +112,7 @@ export function createTestEnv(backend: MuxBackend): TestEnv {
     }
   }
 
-  return { dir, backend, surfaces: [], tempFiles: [] };
+  return { dir, surfaces: [], tempFiles: [] };
 }
 
 /**
@@ -219,34 +122,30 @@ export function cleanupTestEnv(env: TestEnv): void {
   for (const surface of env.surfaces) {
     try {
       closeSurface(surface);
-    } catch {}
+    } catch {
+      // Best effort — the pane may already be gone.
+    }
   }
   for (const file of env.tempFiles) {
     try {
       unlinkSync(file);
-    } catch {}
+    } catch {
+      // Best effort — the file may already be gone.
+    }
   }
   try {
     rmSync(env.dir, { recursive: true, force: true });
-  } catch {}
+  } catch {
+    // Best effort — the temp dir may already be gone.
+  }
 }
 
 /**
- * Create a surface and register it for automatic cleanup.
+ * Create a pane (split from the caller, unfocused) and register it for
+ * automatic cleanup.
  */
 export function createTrackedSurface(env: TestEnv, name: string): string {
   const surface = createSurface(name);
-  env.surfaces.push(surface);
-  return surface;
-}
-
-export function createTrackedSurfaceSplit(
-  env: TestEnv,
-  name: string,
-  direction: "left" | "right" | "up" | "down",
-  fromSurface?: string,
-): string {
-  const surface = createSurfaceSplit(name, direction, fromSurface);
   env.surfaces.push(surface);
   return surface;
 }
@@ -261,8 +160,8 @@ export function untrackSurface(env: TestEnv, surface: string): void {
 // ── Pi session management ──
 
 /**
- * Start a pi session in a mux surface with the subagents extension loaded.
- * Returns immediately — the pi process runs asynchronously in the surface.
+ * Start a pi session in a Luvus pane with the subagents extension loaded.
+ * Returns immediately — the pi process runs asynchronously in the pane.
  *
  * The command ends with a sentinel so we can detect when pi exits:
  *   `pi ...; echo '__TEST_DONE_'$?'__'`
@@ -300,7 +199,7 @@ export function startPi(
 // ── Polling helpers ──
 
 /**
- * Poll until a regex pattern appears in the surface's screen output.
+ * Poll until a regex pattern appears in the pane's screen output.
  * Throws on timeout with the last screen contents for debugging.
  */
 export async function waitForScreen(
@@ -313,15 +212,22 @@ export async function waitForScreen(
   while (Date.now() - start < timeout) {
     try {
       const screen = await readScreenAsync(surface, lines);
-      if (pattern.test(screen)) return screen;
-    } catch {}
+      // Panes split from narrow callers wrap output mid-marker; also match
+      // against the screen with line breaks joined.
+      const joined = screen.replace(/\s*\n\s*/g, "");
+      if (pattern.test(screen) || pattern.test(joined)) return screen;
+    } catch {
+      // Best effort — the pane may already be closed.
+    }
     await sleep(2000);
   }
 
   let finalScreen = "";
   try {
     finalScreen = readScreen(surface, lines);
-  } catch {}
+  } catch {
+    // Best effort — the pane may already be closed.
+  }
   throw new Error(
     `Timeout (${timeout}ms) waiting for pattern ${pattern}.\nLast screen:\n${finalScreen.slice(-1000)}`,
   );
@@ -351,7 +257,7 @@ export async function waitForFile(
 }
 
 /**
- * Wait for the pi process in a surface to exit (sentinel detection).
+ * Wait for the pi process in a pane to exit (sentinel detection).
  * Returns the exit code.
  */
 export async function waitForPiExit(

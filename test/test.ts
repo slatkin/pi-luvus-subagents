@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync } from "nod
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { visibleWidth } from "@mariozechner/pi-tui";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import * as subagentsModule from "../pi-extension/subagents/index.ts";
 
 import {
@@ -18,19 +18,14 @@ import {
 } from "../pi-extension/subagents/session.ts";
 
 import {
+  closeSurface,
+  createSurface,
+  isMuxAvailable,
+  readScreen,
+  sendEscape,
   shellEscape,
-  isCmuxAvailable,
-  isWezTermAvailable,
-  parseCmuxFocusedSnapshot,
-  parseCmuxFocusedSnapshotFromJson,
-  parseCmuxJson,
-  parseCmuxPaneRefForSurface,
-  parseCmuxPaneRefForSurfaceFromJson,
-  canSplitZellijPane,
-  predictZellijSplitDirection,
-  selectZellijPlacement,
-  selectZellijStackPlacement,
-} from "../pi-extension/subagents/cmux.ts";
+  __pollForExitTest__,
+} from "../pi-extension/subagents/luvus.ts";
 import {
   advanceStatusState,
   capStatusLines,
@@ -54,7 +49,20 @@ import {
   shouldAutoExitOnAgentEnd,
   findLatestAssistantError,
 } from "../pi-extension/subagents/subagent-done.ts";
-import { __pollForExitTest__ } from "../pi-extension/subagents/cmux.ts";
+
+// --- Fixture ---
+// Captured live via `$LUVUS_BIN_PATH pane split $LUVUS_PANE_ID --no-focus` on 2026-09-28
+// (design.md Decision 3): the new pane id is `result.pane`.
+// {
+//   "id": "1",
+//   "result": {
+//     "pane": "24",
+//     "revision": 329037,
+//     "tab": "1",
+//     "type": "pane",
+//     "workspace": "2"
+//   }
+// }
 
 // --- Helpers ---
 
@@ -1294,7 +1302,7 @@ describe("subagent-done.ts", () => {
   });
 });
 
-describe("cmux.ts interpretExitSidecar", () => {
+describe("luvus.ts interpretExitSidecar", () => {
   const { interpretExitSidecar } = __pollForExitTest__;
 
   it("decodes ping payloads", () => {
@@ -2085,7 +2093,7 @@ describe("subagents widget rendering", () => {
   });
 });
 
-describe("cmux.ts", () => {
+describe("luvus.ts", () => {
   describe("shellEscape", () => {
     it("wraps in single quotes", () => {
       assert.equal(shellEscape("hello"), "'hello'");
@@ -2108,271 +2116,153 @@ describe("cmux.ts", () => {
       assert.ok(escaped.includes("$world"));
     });
   });
+});
 
-  describe("parseCmuxFocusedSnapshot", () => {
-    it("parses focused surface and pane refs", () => {
-      assert.deepEqual(
-        parseCmuxFocusedSnapshot({ focused: { surface_ref: "surface:3", pane_ref: "pane:2" } }),
-        { surfaceRef: "surface:3", paneRef: "pane:2" },
-      );
-    });
+describe("luvus backend", () => {
+  // Stub Luvus CLI: echoes canned JSON envelopes per command and logs each
+  // invocation to $LUVUS_STUB_LOG so tests can assert the exact argv.
+  function writeLuvusStub(dir: string): string {
+    const stub = join(dir, "luvus-stub.sh");
+    writeFileSync(
+      stub,
+      `#!/bin/bash
+if [ -n "$LUVUS_STUB_LOG" ]; then
+  printf '%s\\n' "$*" >> "$LUVUS_STUB_LOG"
+fi
+case "$LUVUS_STUB_MODE" in
+  error)
+    echo '{"error":{"code":"boom","message":"stub exploded"}}'
+    exit 0
+    ;;
+  no-pane)
+    echo '{"id":"1","result":{"revision":1,"type":"pane"}}'
+    exit 0
+    ;;
+esac
+case "$1 $2" in
+  "pane split")
+    echo '{"id":"1","result":{"pane":"24","revision":329037,"tab":"1","type":"pane","workspace":"2"}}'
+    ;;
+  "pane read")
+    echo '{"id":"1","result":{"revision":1,"text":"l1\\nl2\\nl3\\nl4\\nl5\\nl6\\nl7\\nl8","type":"pane_read"}}'
+    ;;
+  *)
+    echo '{"id":"1","result":{"revision":1,"type":"ok"}}'
+    ;;
+esac
+`,
+      { mode: 0o755 },
+    );
+    return stub;
+  }
 
-    it("does not fall back to caller refs", () => {
-      assert.equal(
-        parseCmuxFocusedSnapshot({ caller: { surface_ref: "surface:1", pane_ref: "pane:1" } }),
-        null,
-      );
-    });
+  /**
+   * Set env vars for the duration of fn, restoring afterwards. Undefined
+   * deletes the variable — tests must pass all three LUVUS_* keys explicitly
+   * because the runner itself may run inside Luvus with them ambient.
+   */
+  function withLuvusEnv(env: Record<string, string | undefined>, fn: () => unknown): unknown {
+    const saved = new Map(Object.keys(env).map((k) => [k, process.env[k]]));
+    for (const [key, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    try {
+      return fn();
+    } finally {
+      for (const [key, value] of saved) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  }
 
-    it("returns null for malformed values", () => {
-      assert.equal(parseCmuxFocusedSnapshot(null), null);
-      assert.equal(parseCmuxFocusedSnapshot({ focused: {} }), null);
-    });
+  const allLuvusKeys = (over: Record<string, string | undefined>) => ({
+    LUVUS_ENV: undefined,
+    LUVUS_BIN_PATH: undefined,
+    LUVUS_PANE_ID: undefined,
+    ...over,
   });
 
-  describe("parseCmuxJson", () => {
-    it("returns null for malformed JSON text", () => {
-      assert.equal(parseCmuxJson("not json"), null);
-    });
+  let stubDir: string;
+  let stubPath: string;
 
-    it("parses valid JSON text", () => {
-      assert.deepEqual(parseCmuxJson('{"ok":true}'), { ok: true });
-    });
+  before(() => {
+    stubDir = mkdtempSync(join(tmpdir(), "luvus-stub-"));
+    stubPath = writeLuvusStub(stubDir);
   });
 
-  describe("parseCmuxFocusedSnapshotFromJson", () => {
-    it("returns null for malformed JSON text", () => {
-      assert.equal(parseCmuxFocusedSnapshotFromJson("not json"), null);
-    });
+  after(() => {
+    rmSync(stubDir, { recursive: true, force: true });
+  });
 
-    it("returns null when focused is absent or not an object", () => {
-      assert.equal(
-        parseCmuxFocusedSnapshotFromJson('{"focused":null,"caller":{"surface_ref":"surface:1","pane_ref":"pane:1"}}'),
-        null,
-      );
-      assert.equal(
-        parseCmuxFocusedSnapshotFromJson('{"caller":{"surface_ref":"surface:1","pane_ref":"pane:1"}}'),
-        null,
-      );
-    });
+  it("is available only when all three LUVUS_* env vars are set", () => {
+    assert.equal(withLuvusEnv(allLuvusKeys({ LUVUS_ENV: "1", LUVUS_BIN_PATH: stubPath, LUVUS_PANE_ID: "21" }), isMuxAvailable), true);
+    assert.equal(withLuvusEnv(allLuvusKeys({ LUVUS_BIN_PATH: stubPath, LUVUS_PANE_ID: "21" }), isMuxAvailable), false);
+    assert.equal(withLuvusEnv(allLuvusKeys({ LUVUS_ENV: "1", LUVUS_BIN_PATH: stubPath }), isMuxAvailable), false);
+    assert.equal(withLuvusEnv(allLuvusKeys({ LUVUS_ENV: "1", LUVUS_PANE_ID: "21" }), isMuxAvailable), false);
+    assert.equal(withLuvusEnv(allLuvusKeys({}), isMuxAvailable), false);
+  });
 
-    it("parses focused refs without falling back to caller refs", () => {
-      assert.deepEqual(
-        parseCmuxFocusedSnapshotFromJson(
-          '{"caller":{"surface_ref":"surface:1","pane_ref":"pane:1"},"focused":{"surface_ref":"surface:2","pane_ref":"pane:3"}}',
+  it("createSurface splits the caller pane unfocused and reads the pane id from the 1.1 fixture", () => {
+    const log = join(stubDir, "calls.log");
+    const surface = withLuvusEnv(
+      allLuvusKeys({ LUVUS_ENV: "1", LUVUS_BIN_PATH: stubPath, LUVUS_PANE_ID: "21", LUVUS_STUB_LOG: log }),
+      () => createSurface("Scout"),
+    );
+    assert.equal(surface, "24");
+    assert.deepEqual(readFileSync(log, "utf8").trim().split("\n"), [
+      "pane split 21 --no-focus",
+      "pane name scout --pane 24",
+    ]);
+  });
+
+  it("createSurface slugifies free-text names into valid Luvus pane names", () => {
+    const log = join(stubDir, "calls-slug.log");
+    withLuvusEnv(
+      allLuvusKeys({ LUVUS_ENV: "1", LUVUS_BIN_PATH: stubPath, LUVUS_PANE_ID: "21", LUVUS_STUB_LOG: log }),
+      () => createSurface("Review: API diff!"),
+    );
+    const calls = readFileSync(log, "utf8").trim().split("\n");
+    assert.equal(calls[1], "pane name review-api-diff --pane 24");
+  });
+
+  it("createSurface throws with the raw JSON when the split result has no pane id", () => {
+    assert.throws(
+      () =>
+        withLuvusEnv(
+          allLuvusKeys({ LUVUS_ENV: "1", LUVUS_BIN_PATH: stubPath, LUVUS_PANE_ID: "21", LUVUS_STUB_MODE: "no-pane" }),
+          () => createSurface("Scout"),
         ),
-        { surfaceRef: "surface:2", paneRef: "pane:3" },
-      );
-    });
+      /no pane id/,
+    );
   });
 
-  describe("parseCmuxPaneRefForSurface", () => {
-    it("parses top-level pane refs for a surface", () => {
-      assert.equal(
-        parseCmuxPaneRefForSurface({ surface_ref: "surface:7", pane_ref: "pane:4" }, "surface:7"),
-        "pane:4",
-      );
-    });
-
-    it("parses caller pane refs for identify --surface output", () => {
-      assert.equal(
-        parseCmuxPaneRefForSurface(
-          { caller: { surface_ref: "surface:7", pane_ref: "pane:4" } },
-          "surface:7",
+  it("surfaces the Luvus .error message as an Error", () => {
+    assert.throws(
+      () =>
+        withLuvusEnv(
+          allLuvusKeys({ LUVUS_ENV: "1", LUVUS_BIN_PATH: stubPath, LUVUS_PANE_ID: "21", LUVUS_STUB_MODE: "error" }),
+          () => closeSurface("24"),
         ),
-        "pane:4",
-      );
-    });
-
-    it("returns null when the surface does not match", () => {
-      assert.equal(
-        parseCmuxPaneRefForSurface({ surface_ref: "surface:8", pane_ref: "pane:4" }, "surface:7"),
-        null,
-      );
-    });
+      /stub exploded/,
+    );
   });
 
-  describe("parseCmuxPaneRefForSurfaceFromJson", () => {
-    it("returns null for malformed JSON text", () => {
-      assert.equal(parseCmuxPaneRefForSurfaceFromJson("not json", "surface:7"), null);
-    });
-
-    it("parses caller refs from cmux identify --surface JSON text", () => {
-      assert.equal(
-        parseCmuxPaneRefForSurfaceFromJson(
-          '{"caller":{"surface_ref":"surface:7","pane_ref":"pane:4"}}',
-          "surface:7",
-        ),
-        "pane:4",
-      );
-    });
+  it("readScreen tails the screen to n lines", () => {
+    const screen = withLuvusEnv(
+      allLuvusKeys({ LUVUS_ENV: "1", LUVUS_BIN_PATH: stubPath, LUVUS_PANE_ID: "21" }),
+      () => readScreen("24", 3),
+    );
+    assert.equal(screen, "l6\nl7\nl8");
   });
 
-  describe("zellij placement", () => {
-    const pane = (overrides: any) => ({
-      id: 1,
-      is_plugin: false,
-      is_floating: false,
-      is_selectable: true,
-      exited: false,
-      pane_rows: 20,
-      pane_columns: 80,
-      tab_id: 1,
-      ...overrides,
-    });
-
-    it("matches Zellij direction and minimum split rules", () => {
-      assert.equal(predictZellijSplitDirection(pane({ pane_rows: 5, pane_columns: 11 })), "right");
-      assert.equal(predictZellijSplitDirection(pane({ pane_rows: 11, pane_columns: 5 })), "down");
-      assert.equal(predictZellijSplitDirection(pane({ pane_rows: 5, pane_columns: 10 })), null);
-      assert.equal(predictZellijSplitDirection(pane({ pane_rows: 4, pane_columns: 80 })), null);
-
-      assert.equal(canSplitZellijPane(pane({ pane_rows: 5, pane_columns: 11 })), true);
-      assert.equal(canSplitZellijPane(pane({ pane_rows: 11, pane_columns: 5 })), true);
-      assert.equal(canSplitZellijPane(pane({ pane_rows: 5, pane_columns: 10 })), false);
-      assert.equal(canSplitZellijPane(pane({ pane_rows: 4, pane_columns: 80 })), false);
-
-      assert.equal(canSplitZellijPane(pane({ pane_rows: 30, pane_columns: 100 }), 80, 20), false);
-      assert.equal(canSplitZellijPane(pane({ pane_rows: 45, pane_columns: 100 }), 80, 20), true);
-      assert.equal(canSplitZellijPane(pane({ pane_rows: 30, pane_columns: 170 }), 80, 20), true);
-      assert.equal(canSplitZellijPane(pane({ pane_rows: 31, pane_columns: 47 }), 50, 10), false);
-      assert.equal(canSplitZellijPane(pane({ pane_rows: 31, pane_columns: 77 }), 50, 10), true);
-    });
-
-    it("uses tab-scoped split only when all Zellij split candidates are safe", () => {
-      const plan = selectZellijPlacement(
-        [
-          pane({ id: 10, tab_id: 1, pane_rows: 40, pane_columns: 120 }),
-          pane({ id: 11, tab_id: 1, pane_rows: 120, pane_columns: 100 }),
-          pane({ id: 12, tab_id: 2, pane_rows: 60, pane_columns: 200 }),
-        ],
-        10,
-      );
-
-      assert.deepEqual(plan, {
-        mode: "split",
-        anchorPaneId: 11,
-        targetPaneId: 11,
-        tabId: 1,
-        splitDirection: "down",
-      });
-    });
-
-    it("stacks when any Zellij split candidate would fall below Pi's configured minimum", () => {
-      const plan = selectZellijPlacement(
-        [
-          pane({ id: 10, tab_id: 1, pane_rows: 100, pane_columns: 47 }),
-          pane({ id: 11, tab_id: 1, pane_rows: 31, pane_columns: 77 }),
-        ],
-        10,
-        50,
-        10,
-      );
-
-      assert.deepEqual(plan, {
-        mode: "stack",
-        anchorPaneId: 11,
-        targetPaneId: 11,
-        tabId: 1,
-      });
-    });
-
-    it("stacks when Zellij would split a pane below Pi's usable minimum", () => {
-      const plan = selectZellijPlacement(
-        [
-          pane({ id: 10, tab_id: 1, pane_rows: 20, pane_columns: 20 }),
-          pane({ id: 11, tab_id: 1, pane_rows: 18, pane_columns: 60 }),
-          pane({ id: 12, tab_id: 1, pane_rows: 10, pane_columns: 70 }),
-        ],
-        10,
-      );
-
-      assert.deepEqual(plan, {
-        mode: "stack",
-        anchorPaneId: 11,
-        targetPaneId: 11,
-        tabId: 1,
-      });
-    });
-
-    it("never chooses the parent pane as the stack target", () => {
-      const plan = selectZellijStackPlacement(
-        [
-          pane({ id: 10, tab_id: 1, pane_rows: 60, pane_columns: 200 }),
-          pane({ id: 11, tab_id: 1, pane_rows: 10, pane_columns: 20 }),
-          pane({ id: 12, tab_id: 1, pane_rows: 8, pane_columns: 30 }),
-        ],
-        10,
-      );
-
-      assert.deepEqual(plan, {
-        mode: "stack",
-        anchorPaneId: 12,
-        targetPaneId: 12,
-        tabId: 1,
-      });
-    });
-
-    it("does not stack when the only usable pane is the parent", () => {
-      const plan = selectZellijStackPlacement(
-        [pane({ id: 10, tab_id: 1, pane_rows: 60, pane_columns: 200 })],
-        10,
-      );
-
-      assert.equal(plan, null);
-    });
-
-    it("stacks on the largest usable non-parent pane when none can split", () => {
-      const plan = selectZellijPlacement(
-        [
-          pane({ id: 10, tab_id: 1, pane_rows: 5, pane_columns: 10 }),
-          pane({ id: 11, tab_id: 1, pane_rows: 6, pane_columns: 8 }),
-          pane({ id: 12, tab_id: 2, pane_rows: 60, pane_columns: 200 }),
-        ],
-        10,
-      );
-
-      assert.deepEqual(plan, {
-        mode: "stack",
-        anchorPaneId: 11,
-        targetPaneId: 11,
-        tabId: 1,
-      });
-    });
-
-    it("ignores floating, plugin, exited, unselectable, and other-tab panes", () => {
-      const plan = selectZellijPlacement(
-        [
-          pane({ id: 10, tab_id: 1, pane_rows: 5, pane_columns: 10 }),
-          pane({ id: 11, tab_id: 1, pane_rows: 60, pane_columns: 200, is_floating: true }),
-          pane({ id: 12, tab_id: 1, pane_rows: 60, pane_columns: 200, is_plugin: true }),
-          pane({ id: 13, tab_id: 1, pane_rows: 60, pane_columns: 200, exited: true }),
-          pane({ id: 14, tab_id: 1, pane_rows: 60, pane_columns: 200, is_selectable: false }),
-          pane({ id: 15, tab_id: 2, pane_rows: 60, pane_columns: 200 }),
-        ],
-        10,
-      );
-
-      assert.equal(plan, null);
-    });
-
-    it("returns null when the parent pane cannot be found", () => {
-      assert.equal(selectZellijPlacement([pane({ id: 10 })], 99), null);
-    });
-  });
-
-  describe("isCmuxAvailable", () => {
-    it("returns boolean based on CMUX_SOCKET_PATH", () => {
-      // Can't easily mock env in node:test, just verify it returns a boolean
-      const result = isCmuxAvailable();
-      assert.equal(typeof result, "boolean");
-    });
-  });
-
-  describe("isWezTermAvailable", () => {
-    it("returns boolean based on WEZTERM_UNIX_SOCKET", () => {
-      const result = isWezTermAvailable();
-      assert.equal(typeof result, "boolean");
-    });
+  it("sendEscape sends the escape key through agent keys", () => {
+    const log = join(stubDir, "calls-esc.log");
+    withLuvusEnv(
+      allLuvusKeys({ LUVUS_ENV: "1", LUVUS_BIN_PATH: stubPath, LUVUS_PANE_ID: "21", LUVUS_STUB_LOG: log }),
+      () => sendEscape("24"),
+    );
+    assert.deepEqual(readFileSync(log, "utf8").trim().split("\n"), ["agent keys 24 esc"]);
   });
 });

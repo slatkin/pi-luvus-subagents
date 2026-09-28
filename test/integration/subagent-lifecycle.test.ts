@@ -2,15 +2,14 @@
  * Integration tests for the full subagent lifecycle.
  *
  * These tests spawn REAL pi sessions with REAL LLM calls (haiku by default).
- * Each test creates a mux surface, runs pi with a task that uses the subagent
+ * Each test creates a Luvus pane, runs pi with a task that uses the subagent
  * tool, and verifies the outcome via marker files and screen output.
  *
  * Costs: ~$0.01-0.05 per test run (haiku).
  * Duration: ~30-90s per test.
  *
- * Run inside a supported multiplexer:
- *   cmux bash -c 'npm run test:integration'
- *   tmux new 'npm run test:integration'
+ * Run inside a Luvus pane (skips elsewhere):
+ *   LUVUS_ENV=1 pi  # then: npm run test:integration
  *
  * Configuration:
  *   PI_TEST_MODEL     — model for all pi sessions (default: anthropic/claude-haiku-4-5)
@@ -18,11 +17,9 @@
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import {
-  getAvailableBackends,
-  setBackend,
-  restoreBackend,
+  luvusAvailable,
   createTestEnv,
   cleanupTestEnv,
   createTrackedSurface,
@@ -37,27 +34,23 @@ import {
   type TestEnv,
 } from "./harness.ts";
 
-const backends = getAvailableBackends();
+const available = luvusAvailable();
 
-if (backends.length === 0) {
-  console.log("⚠️  No mux backend available — skipping subagent lifecycle integration tests");
-  console.log("   Run inside cmux or tmux to enable these tests.");
+if (!available) {
+  console.log("⚠️  Not inside a Luvus pane — skipping subagent lifecycle integration tests");
+  console.log("   Run pi inside Luvus (LUVUS_ENV set) to enable these tests.");
 }
 
-for (const backend of backends) {
-  describe(`subagent-lifecycle [${backend}]`, { timeout: PI_TIMEOUT * 3 }, () => {
-    let prevMux: string | undefined;
-    let env: TestEnv;
+describe("subagent-lifecycle [luvus]", { timeout: PI_TIMEOUT * 3, skip: !available }, () => {
+  let env: TestEnv;
 
-    before(() => {
-      prevMux = setBackend(backend);
-      env = createTestEnv(backend);
-    });
+  before(() => {
+    env = createTestEnv();
+  });
 
-    after(() => {
-      cleanupTestEnv(env);
-      restoreBackend(prevMux);
-    });
+  after(() => {
+    cleanupTestEnv(env);
+  });
 
     // ── Basic spawn + completion ──
 
@@ -208,7 +201,7 @@ for (const backend of backends) {
         `Call the subagent tool with these EXACT parameters:`,
         `  name: "Fork-${id}"`,
         `  fork: true`,
-        `  task: "Run this bash command: echo 'FORK_OK_${id}' > '${markerFile}'"`,
+        `  task: "Run this bash command: echo 'FORK_OK_${id}' > '${markerFile}'. When finished, call the subagent_done tool."`,
         `Do not set the agent parameter. Just set name, fork, and task.`,
         `After you receive the result, say FORK_COMPLETE.`,
       ].join("\n");
@@ -328,5 +321,4 @@ for (const backend of backends) {
       const content = await waitForFile(markerFile, PI_TIMEOUT, /SYSPROMPT/);
       assert.ok(content.includes(`SYSPROMPT_${id}`), `System prompt test marker should exist`);
     });
-  });
-}
+});
