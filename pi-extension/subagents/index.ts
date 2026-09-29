@@ -815,6 +815,13 @@ export function buildLaunchMessagingHint(siblingNames: string[]): string {
   return `You can message ${list} with subagent_message; it does not end your session.`;
 }
 
+/** Task hint shown to the child: auto-exit agents are now told to exit explicitly too. */
+export function resolveModeHint(autoExit?: boolean): string {
+  return autoExit
+    ? "Complete your task autonomously. Call subagent_done when finished."
+    : "Complete your task. When finished, call the subagent_done tool. The user can interact with you at any time.";
+}
+
 export function buildSubagentTaskPrompt(params: {
   task: string;
   roleBlock: string;
@@ -1474,9 +1481,7 @@ async function launchSubagent(
   // Build the task message
   // Only full-context fork mode inherits prior conversation state.
   // Blank-session modes need the wrapper instructions and artifact-backed handoff.
-  const modeHint = agentDefs?.autoExit
-    ? "Complete your task autonomously."
-    : "Complete your task. When finished, call the subagent_done tool. The user can interact with you at any time.";
+  const modeHint = resolveModeHint(agentDefs?.autoExit);
   const summaryInstruction = agentDefs?.autoExit
     ? "Your FINAL assistant message should summarize what you accomplished."
     : "Your FINAL assistant message (before calling subagent_done or before the user exits) should summarize what you accomplished.";

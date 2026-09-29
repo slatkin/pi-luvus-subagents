@@ -51,8 +51,10 @@ import {
 import {
   shouldMarkUserTookOver,
   shouldAutoExitOnAgentEnd,
+  shouldScheduleAgentEndNudge,
   findLatestAssistantError,
 } from "../pi-extension/subagents/subagent-done.ts";
+import subagentDoneExtension from "../pi-extension/subagents/subagent-done.ts";
 
 // --- Fixture ---
 // Captured live via `$LUVUS_BIN_PATH pane split $LUVUS_PANE_ID --no-focus` on 2026-09-28
@@ -81,10 +83,10 @@ function createSessionFile(dir: string, entries: object[]): string {
   return file;
 }
 
-function withTempDir(run: (dir: string) => void) {
+async function withTempDir(run: (dir: string) => void | Promise<void>) {
   const dir = createTestDir();
   try {
-    run(dir);
+    await run(dir);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -924,6 +926,11 @@ describe("status.ts", () => {
 });
 
 describe("surface placement resolution", () => {
+  it("modeHint names subagent_done for auto-exit agents too", () => {
+    assert.match(subagentsModule.resolveModeHint(true), /Call subagent_done when finished/);
+    assert.match(subagentsModule.resolveModeHint(false), /call the subagent_done tool/);
+    assert.match(subagentsModule.resolveModeHint(undefined), /call the subagent_done tool/);
+  });
   it("prefers the tool param over the configured default and ignores invalid values", () => {
     const saved = subagentsModule.getSurfaceDefault();
     try {
@@ -1367,6 +1374,174 @@ describe("subagent-done.ts", () => {
     it("returns null when messages is undefined or empty", () => {
       assert.equal(findLatestAssistantError(undefined), null);
       assert.equal(findLatestAssistantError([]), null);
+    });
+  });
+});
+
+describe("subagent-done nudge", () => {
+  /** Load the child extension with a mock pi API under the given env. */
+  function loadChildExtension(env: Record<string, string | undefined>) {
+    const saved = new Map(Object.keys(env).map((k) => [k, process.env[k]]));
+    for (const [key, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    const handlers: Record<string, Array<(event?: any, ctx?: any) => void>> = {};
+    const tools: Array<any> = [];
+    const sentMessages: Array<{ message: string; opts?: any }> = [];
+    const mockPi: any = {
+      on(name: string, handler: (event?: any, ctx?: any) => void) {
+        (handlers[name] ??= []).push(handler);
+      },
+      registerTool(tool: any) {
+        tools.push(tool);
+      },
+      registerShortcut() {},
+      getAllTools() {
+        return [];
+      },
+      setWidget() {},
+      sendUserMessage(message: string, opts?: any) {
+        sentMessages.push({ message, opts });
+      },
+    };
+    try {
+      (subagentDoneExtension as any)(mockPi);
+    } catch (error) {
+      for (const [key, value] of saved) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      throw error;
+    }
+    const restoreEnv = () => {
+      for (const [key, value] of saved) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    };
+    return { handlers, tools, sentMessages, restoreEnv };
+  }
+
+  const fire = (handlers: Record<string, Array<(event?: any, ctx?: any) => void>>, name: string, event?: any, ctx?: any) => {
+    for (const handler of handlers[name] ?? []) handler(event, ctx);
+  };
+
+  it("decides to nudge only on a normal model stop", () => {
+    assert.equal(shouldScheduleAgentEndNudge([{ role: "assistant", stopReason: "stop" }]), true);
+    assert.equal(shouldScheduleAgentEndNudge([{ role: "assistant", stopReason: "error" }]), false);
+    assert.equal(shouldScheduleAgentEndNudge([{ role: "assistant", stopReason: "aborted" }]), false);
+    assert.equal(shouldScheduleAgentEndNudge([{ role: "assistant", stopReason: "length" }]), false);
+    assert.equal(shouldScheduleAgentEndNudge(undefined), false);
+  });
+
+  it("agent_end on a normal stop does not write the done sidecar", () => {
+    withTempDir((dir) => {
+      const sessionFile = join(dir, "child.jsonl");
+      const { handlers, restoreEnv } = loadChildExtension({
+        PI_SUBAGENT_SESSION: sessionFile,
+        PI_SUBAGENT_NUDGE_DISABLE: "1",
+      });
+      try {
+        fire(handlers, "agent_start");
+        let shutdownCalled = false;
+        fire(handlers, "agent_end", { messages: [{ role: "assistant", stopReason: "stop" }] }, { shutdown: () => (shutdownCalled = true) });
+
+        assert.equal(shutdownCalled, false);
+        assert.equal(existsSync(`${sessionFile}.exit`), false);
+      } finally {
+        restoreEnv();
+      }
+    });
+  });
+
+  it("agent_end on an error stop still writes the error sidecar and shuts down", () => {
+    withTempDir((dir) => {
+      const sessionFile = join(dir, "child.jsonl");
+      const { handlers, restoreEnv } = loadChildExtension({ PI_SUBAGENT_SESSION: sessionFile });
+      try {
+        fire(handlers, "agent_start");
+        let shutdownCalled = false;
+        fire(
+          handlers,
+          "agent_end",
+          { messages: [{ role: "assistant", stopReason: "error", errorMessage: "529 overloaded" }] },
+          { shutdown: () => (shutdownCalled = true) },
+        );
+
+        assert.equal(shutdownCalled, true);
+        assert.deepEqual(JSON.parse(readFileSync(`${sessionFile}.exit`, "utf8")), {
+          type: "error",
+          errorMessage: "529 overloaded",
+          stopReason: "error",
+        });
+      } finally {
+        restoreEnv();
+      }
+    });
+  });
+
+  it("calls subagent_done before agent_end: sidecar written and no nudge fires", async () => {
+    await withTempDir(async (dir) => {
+      const sessionFile = join(dir, "child.jsonl");
+      const { handlers, tools, sentMessages, restoreEnv } = loadChildExtension({
+        PI_SUBAGENT_SESSION: sessionFile,
+        PI_SUBAGENT_NUDGE_DELAY_MS: "1000",
+      });
+      try {
+        const doneTool = tools.find((t) => t.name === "subagent_done");
+        assert.ok(doneTool, "expected subagent_done to be registered");
+        await doneTool.execute("t1", {}, undefined, undefined, { shutdown() {} });
+        assert.equal(existsSync(`${sessionFile}.exit`), true);
+
+        fire(handlers, "agent_start");
+        fire(handlers, "agent_end", { messages: [{ role: "assistant", stopReason: "stop" }] }, { shutdown() {} });
+        await new Promise((resolve) => setTimeout(resolve, 1100));
+        assert.equal(sentMessages.length, 0);
+      } finally {
+        restoreEnv();
+      }
+    });
+  });
+
+  it("nudge fires after the delay when the agent stays idle", async () => {
+    await withTempDir(async (_dir) => {
+      const { handlers, sentMessages, restoreEnv } = loadChildExtension({
+        PI_SUBAGENT_NUDGE_DELAY_MS: "1000",
+      });
+      try {
+        fire(handlers, "agent_start");
+        fire(handlers, "agent_end", { messages: [{ role: "assistant", stopReason: "stop" }] }, { shutdown() {} });
+
+        await new Promise((resolve) => setTimeout(resolve, 1100));
+        assert.equal(sentMessages.length, 1);
+        assert.match(sentMessages[0].message, /subagent_done/);
+        assert.deepEqual(sentMessages[0].opts, { deliverAs: "followUp" });
+      } finally {
+        restoreEnv();
+      }
+    });
+  });
+
+  it("pending nudge is cancelled by user input and by a new agent cycle", async () => {
+    await withTempDir(async (_dir) => {
+      const { handlers, sentMessages, restoreEnv } = loadChildExtension({
+        PI_SUBAGENT_NUDGE_DELAY_MS: "1000",
+      });
+      try {
+        fire(handlers, "agent_start");
+        fire(handlers, "agent_end", { messages: [{ role: "assistant", stopReason: "stop" }] }, { shutdown() {} });
+        fire(handlers, "input");
+        await new Promise((resolve) => setTimeout(resolve, 1100));
+        assert.equal(sentMessages.length, 0);
+
+        fire(handlers, "agent_end", { messages: [{ role: "assistant", stopReason: "stop" }] }, { shutdown() {} });
+        fire(handlers, "before_agent_start");
+        await new Promise((resolve) => setTimeout(resolve, 1100));
+        assert.equal(sentMessages.length, 0);
+      } finally {
+        restoreEnv();
+      }
     });
   });
 });

@@ -341,20 +341,30 @@ session-mode: lineage-only
 ---
 ```
 
-### `auto-exit`
+### `auto-exit` and the completion nudge
 
-When set to `true`, the agent session shuts down automatically as soon as the agent finishes its turn — no explicit `subagent_done` call is needed.
+Every sub-agent session exits through an explicit tool call: `subagent_done` to finish, or `caller_ping` to hand a question back to the parent. There is no silent auto-shutdown — even agents with `auto-exit: true` must call `subagent_done` when they finish.
 
-**Behavior:**
+To make that reliable, the child extension **nudges itself**: when the agent finishes a turn normally without calling `subagent_done`, it receives a follow-up reminder after 5 seconds:
 
-- The session closes after the agent's final message (on the `agent_end` event)
-- If the user sends **any input** before the agent finishes, auto-exit is permanently disabled for that session — the user takes over interactively
-- The modeHint injected into the agent's task is adjusted accordingly: autonomous agents see "Complete your task autonomously." rather than instructions to call `subagent_done`
+> [Auto reminder]
+> • Done → call subagent_done to finish.
+> • Before finishing, self-check: are you spinning in place? If so, converge your result immediately and hand it back to the main agent with caller_ping — don't overthink.
+> • Still working → ignore.
 
-**When to use:**
+A pending nudge is cancelled when the agent starts new work, the user types into the pane, or the agent calls `subagent_done`/`caller_ping`. Error stops never nudge — they still exit immediately and report the failure to the parent.
 
-- ✅ Autonomous agents (scout, worker, reviewer) that run to completion
-- ❌ Interactive agents (planner, iterate) where the user drives the session
+Configure the nudge with environment variables (read by the child at launch):
+
+| Variable                   | Default | Purpose                                              |
+| -------------------------- | ------- | ---------------------------------------------------- |
+| `PI_SUBAGENT_NUDGE_DELAY_MS` | `5000` | Delay before the reminder (minimum 1000)             |
+| `PI_SUBAGENT_NUDGE_DISABLE`  | unset  | Set to `1` to disable the nudge entirely              |
+
+**What `auto-exit: true` still does** — it no longer terminates anything. It shapes defaults:
+
+- The task hint tells the agent upfront to call `subagent_done` when finished ("Complete your task autonomously. Call subagent_done when finished.")
+- It is the default for `interactive` (see below): `auto-exit: true` agents are treated as autonomous and get stall pings; agents without it are interactive and stay quiet
 
 ```yaml
 ---
@@ -464,11 +474,11 @@ spawning: false
 
 ## Tools Widget
 
-Every sub-agent session displays a compact tools widget showing available and denied tools. Toggle with `n`:
+Every sub-agent session displays a compact tools widget showing available and denied tools. Toggle with `Ctrl+J`:
 
 ```
-[scout] — 12 tools · 4 denied  (n)              ← collapsed
-[scout] — 12 available  (n to collapse)          ← expanded
+[scout] — 12 tools · 4 denied  (Ctrl+J)              ← collapsed
+[scout] — 12 available  (Ctrl+J to collapse)          ← expanded
   read, bash, edit, write, todo, ...
   denied: subagent, subagents_list, ...
 ```

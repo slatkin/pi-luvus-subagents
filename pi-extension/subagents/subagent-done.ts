@@ -2,6 +2,15 @@
  * Extension loaded into sub-agents.
  * - Shows agent identity + available tools as a styled widget above the editor (toggle with Ctrl+J)
  * - Provides a `subagent_done` tool for autonomous agents to self-terminate
+ * - Nudges any agent that forgets to call subagent_done after generating
+ * - Respects PI_DENY_TOOLS for its own tools: a denied tool is not registered,
+ *   `caller_ping` included; `subagent_done` is never denied.
+ *
+ * Auto-exit is removed: `agent_end` never writes a `done` `.exit` sidecar on its
+ * own, regardless of PI_SUBAGENT_AUTO_EXIT. The only success-path exits are the
+ * explicit `subagent_done` / `caller_ping` tools; an agent that finishes its turn
+ * without calling either is nudged. Provider-error turns still write the error
+ * `.exit` sidecar so the parent learns about failures promptly.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
@@ -11,6 +20,25 @@ import { createSubagentActivityRecorder } from "./activity.ts";
 
 export function shouldMarkUserTookOver(agentStarted: boolean): boolean {
   return agentStarted;
+}
+
+const ASSISTANT_ROLE = "assistant";
+const NORMAL_STOP_REASON = "stop";
+
+/** Return true only when the latest assistant message ended by the model stopping normally. */
+export function shouldScheduleAgentEndNudge(
+  messages: readonly { role?: string; stopReason?: string }[] | undefined,
+): boolean {
+  if (!messages) return false;
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message?.role === ASSISTANT_ROLE) {
+      return message.stopReason === NORMAL_STOP_REASON;
+    }
+  }
+
+  return false;
 }
 
 export function shouldAutoExitOnAgentEnd(
@@ -84,11 +112,61 @@ export default function (pi: ExtensionAPI) {
   const subagentName = process.env.PI_SUBAGENT_NAME ?? "";
   const subagentAgent = process.env.PI_SUBAGENT_AGENT ?? "";
   const deniedToolsValue = process.env.PI_DENY_TOOLS;
+  // Parsed for compatibility; the auto-exit short-circuit is gone — the env var
+  // no longer causes an exit anywhere in this extension.
   const autoExit = process.env.PI_SUBAGENT_AUTO_EXIT === "1";
+  void autoExit;
   const recorder = createSubagentActivityRecorder({
     runningChildId: process.env.PI_SUBAGENT_ID,
     activityFile: process.env.PI_SUBAGENT_ACTIVITY_FILE,
   });
+
+  // ── Agent completion nudge configuration ──
+  /** Delay (ms) before sending a nudge after agent_end. Configurable via env var. */
+  const NUDGE_DELAY_MS = Math.max(
+    1000,
+    parseInt(process.env.PI_SUBAGENT_NUDGE_DELAY_MS ?? "5000", 10) || 5000,
+  );
+  /** Set to "1" to disable the nudge entirely. */
+  const NUDGE_DISABLED = process.env.PI_SUBAGENT_NUDGE_DISABLE === "1";
+  const NUDGE_TEXT =
+    "[Auto reminder]\n" +
+    "• Done → call subagent_done to finish.\n" +
+    "• Before finishing, self-check: are you spinning in place? If so, converge your result " +
+    "immediately and hand it back to the main agent with caller_ping — don't overthink.\n" +
+    "• Still working → ignore.";
+
+  let doneCalled = false;
+  let userInputAfterAgentEnd = false;
+  let nudgeTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Cancel and forget the pending completion reminder, if any. */
+  function clearNudgeTimer(): void {
+    if (nudgeTimer !== null) {
+      clearTimeout(nudgeTimer);
+      nudgeTimer = null;
+    }
+  }
+
+  /**
+   * After a subagent stops normally, schedule a nudge reminding it to call
+   * subagent_done if it hasn't already. Error and aborted runs are excluded.
+   *
+   * Each call replaces any pending nudge, so repeated agent_end events
+   * automatically reset the timer. The nudge only fires if no new agent
+   * activity or user input arrives within NUDGE_DELAY_MS.
+   */
+  function scheduleAgentEndNudge(pi: ExtensionAPI): void {
+    clearNudgeTimer();
+    if (NUDGE_DISABLED || doneCalled) return;
+
+    nudgeTimer = setTimeout(() => {
+      nudgeTimer = null;
+      if (doneCalled || userInputAfterAgentEnd) return;
+
+      pi.sendUserMessage(NUDGE_TEXT, { deliverAs: "followUp" });
+    }, NUDGE_DELAY_MS);
+  }
 
   function renderWidget(ctx: { ui: { setWidget: Function } }, _theme: any) {
     ctx.ui.setWidget(
@@ -147,6 +225,9 @@ export default function (pi: ExtensionAPI) {
   // Show widget + status bar on session start
   pi.on("session_start", (_event, ctx) => {
     recorder.sessionStart();
+    doneCalled = false;
+    userInputAfterAgentEnd = false;
+    clearNudgeTimer();
     const tools = pi.getAllTools();
     toolNames = tools.map((t) => t.name).sort();
     denied = parseDeniedTools(deniedToolsValue);
@@ -156,6 +237,9 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("input", () => {
     recorder.input();
+    // User typed something — they are in control, cancel any pending nudge.
+    userInputAfterAgentEnd = true;
+    clearNudgeTimer();
     // Ignore the initial task message that starts an autonomous subagent.
     // Only inputs after the first agent run has started count as user takeover.
     if (!shouldMarkUserTookOver(agentStarted)) return;
@@ -164,51 +248,54 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("before_agent_start", () => {
     recorder.beforeAgentStart();
+    // Agent is about to generate — clear any pending nudge; the AI is active.
+    clearNudgeTimer();
   });
 
   pi.on("agent_start", () => {
     agentStarted = true;
     recorder.agentStart();
+    // Agent has started a new generation cycle — clear any pending nudge.
+    userInputAfterAgentEnd = false;
+    clearNudgeTimer();
   });
 
   pi.on("agent_end", (event, ctx) => {
     const messages = (event as any).messages as any[] | undefined;
-    const shouldExit = autoExit && shouldAutoExitOnAgentEnd(userTookOver, messages);
 
-    if (shouldExit) {
-      // Surface stopReason: "error" turns (auto-retry exhausted, provider
-      // overload, etc.) to the parent via the .exit sidecar so the watcher
-      // can report a clear failure with the underlying error message.
-      // Without this the parent would only see exit code 0 and a stale
-      // assistant message, mistaking the crash for a successful completion.
-      const errorInfo = findLatestAssistantError(messages);
-      const sessionFile = process.env.PI_SUBAGENT_SESSION;
-      if (errorInfo && sessionFile) {
-        try {
-          writeFileSync(
-            `${sessionFile}.exit`,
-            JSON.stringify({
-              type: "error",
-              errorMessage: errorInfo.errorMessage,
-              stopReason: errorInfo.stopReason,
-            }),
-          );
-        } catch {
-          // Best effort — even without the sidecar, watcher's session-file
-          // fallback can still recover the errorMessage.
-        }
+    // Error turns still exit so the parent learns about the failure promptly
+    // (auto-retry exhausted, provider overload, etc.) — deviation from
+    // maplezzk's port, which leans on the stalled watchdog for errors.
+    // Without this the parent would only see exit code 0 and a stale
+    // assistant message, mistaking the crash for a successful completion.
+    const errorInfo = findLatestAssistantError(messages);
+    const sessionFile = process.env.PI_SUBAGENT_SESSION;
+    if (errorInfo && sessionFile) {
+      try {
+        writeFileSync(
+          `${sessionFile}.exit`,
+          JSON.stringify({
+            type: "error",
+            errorMessage: errorInfo.errorMessage,
+            stopReason: errorInfo.stopReason,
+          }),
+        );
+      } catch {
+        // Best effort — even without the sidecar, watcher's session-file
+        // fallback can still recover the errorMessage.
       }
-
       recorder.agentEndDone();
       ctx.shutdown();
       return;
     }
 
     recorder.agentEndWaiting();
-    if (autoExit) {
-      // Reset any recorded manual input marker. Auto-exit is decided by whether
-      // the latest agent turn completed normally, not by who initiated it.
-      userTookOver = false;
+    // Auto-exit is removed: a normal stop leaves the session open and nudges
+    // the agent to call subagent_done if it forgot. Aborted stops stay quiet.
+    if (shouldScheduleAgentEndNudge(messages)) {
+      scheduleAgentEndNudge(pi);
+    } else {
+      clearNudgeTimer();
     }
   });
 
@@ -253,6 +340,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", (event) => {
+    clearNudgeTimer();
     recorder.sessionShutdown((event as any).reason);
   });
 
@@ -286,6 +374,8 @@ export default function (pi: ExtensionAPI) {
       }
 
       recorder.callerPing();
+      doneCalled = true;
+      clearNudgeTimer();
       const exitData = {
         type: "ping" as const,
         name: process.env.PI_SUBAGENT_NAME ?? "subagent",
@@ -313,6 +403,8 @@ export default function (pi: ExtensionAPI) {
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       const sessionFile = process.env.PI_SUBAGENT_SESSION;
       recorder.subagentDone();
+      doneCalled = true;
+      clearNudgeTimer();
       if (sessionFile) {
         writeFileSync(`${sessionFile}.exit`, JSON.stringify({ type: "done" }));
       }
