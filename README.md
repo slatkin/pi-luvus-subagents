@@ -4,8 +4,6 @@ Async subagents for [pi](https://github.com/badlogic/pi-mono) — spawn, orchest
 
 This is a Luvus-only fork of [HazAT/pi-interactive-subagents](https://github.com/HazAT/pi-interactive-subagents); Luvus is the only supported terminal host. Design decisions are recorded in [`LUVUS-FORK.md`](LUVUS-FORK.md).
 
-https://github.com/user-attachments/assets/30adb156-cfb4-4c47-84ca-dd4aa80cba9f
-
 ## How It Works
 
 Call `subagent()` and it **returns immediately**. The sub-agent runs in its own Luvus pane, split from the caller's pane without stealing focus. A live widget above the input shows all running agents with their current state — `starting`, `active`, `waiting`, `stalled`, or `running`. When a sub-agent finishes, its result is **steered back** into the main session as an async notification — triggering a new turn so the agent can process it.
