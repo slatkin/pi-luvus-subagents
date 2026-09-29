@@ -1,4 +1,5 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SurfacePlacement } from "./luvus.ts";
@@ -9,8 +10,25 @@ export const MAX_STATUS_NAME_LENGTH = 72;
 export const MAX_STATUS_LINE_LENGTH = 120;
 
 const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..");
-const DEFAULT_STATUS_CONFIG_PATH = join(PACKAGE_ROOT, "config.json");
 const STATUS_CONFIG_EXAMPLE_PATH = join(PACKAGE_ROOT, "config.json.example");
+// Legacy location: config.json at the package root (e.g. inside pi's git
+// clone). Still honored on read so existing installs keep their settings.
+const LEGACY_STATUS_CONFIG_PATH = join(PACKAGE_ROOT, "config.json");
+const EXTENSION_DIR_NAME = "pi-luvus-subagents";
+
+/** Resolve the global agent config directory, respecting PI_CODING_AGENT_DIR. */
+function getAgentConfigDir(): string {
+  return process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+}
+
+/**
+ * Canonical per-install config location: the extension's operating area,
+ * e.g. ~/.pi/agent/extensions/pi-luvus-subagents/config.json. Unlike the
+ * package root, this survives `pi update` of the git clone.
+ */
+export function getDefaultConfigPath(): string {
+  return join(getAgentConfigDir(), "extensions", EXTENSION_DIR_NAME, "config.json");
+}
 
 export type SubagentStatusKind = "starting" | "active" | "waiting" | "stalled" | "running";
 export type SubagentStatusSource = "pi" | "claude";
@@ -162,16 +180,21 @@ export function parseSurfaceConfig(rawConfig: unknown, source = "config.json"): 
 }
 
 /**
- * Load the `surface` placement default from the package config. Unlike the
+ * Load the `surface` placement default from the extension config. Unlike the
  * status config, a missing or unreadable file is not fatal — it just means
  * "pane", today's behavior.
  */
 export function loadSurfaceConfig(
-  configPath = DEFAULT_STATUS_CONFIG_PATH,
+  configPath?: string,
   examplePath = STATUS_CONFIG_EXAMPLE_PATH,
+  legacyPath?: string,
 ): SurfacePlacement {
   try {
-    const { sourcePath, rawConfig } = readStatusConfigFile(configPath, examplePath);
+    const { sourcePath, rawConfig } = readStatusConfigFile(
+      configPath ?? getDefaultConfigPath(),
+      examplePath,
+      legacyPath ?? (configPath === undefined ? LEGACY_STATUS_CONFIG_PATH : undefined),
+    );
     return parseSurfaceConfig(JSON.parse(rawConfig), sourcePath);
   } catch {
     return "pane";
@@ -179,39 +202,57 @@ export function loadSurfaceConfig(
 }
 
 /**
- * Persist the `surface` placement default to the package config.json, keeping
- * any other keys. Reads config.json, falling back to the shipped example as
- * the base when the user has not created one yet. Throws on invalid JSON so
- * callers can report it instead of silently truncating the user's config.
+ * Persist the `surface` placement default to the extension config.json,
+ * keeping any other keys. Seeds from the legacy package-root config when the
+ * new file does not exist yet (migration), else from the shipped example.
+ * Throws on invalid JSON so callers can report it instead of silently
+ * truncating the user's config.
  */
 export function writeSurfaceConfig(
   placement: SurfacePlacement,
-  configPath = DEFAULT_STATUS_CONFIG_PATH,
+  configPath?: string,
   examplePath = STATUS_CONFIG_EXAMPLE_PATH,
+  legacyPath?: string,
 ): void {
+  const resolved = configPath ?? getDefaultConfigPath();
+  const legacy = legacyPath ?? (configPath === undefined ? LEGACY_STATUS_CONFIG_PATH : undefined);
   let base: Record<string, unknown> = {};
   try {
-    base = JSON.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>;
+    base = JSON.parse(readFileSync(resolved, "utf8")) as Record<string, unknown>;
   } catch (error) {
     const errno = error as NodeJS.ErrnoException;
     if (errno.code !== "ENOENT") {
       // Existing but unreadable/invalid — refuse to overwrite it.
       throw error;
     }
-    try {
-      base = JSON.parse(readFileSync(examplePath, "utf8")) as Record<string, unknown>;
-    } catch {}
+    for (const seed of [legacy, examplePath]) {
+      if (!seed || seed === resolved) continue;
+      try {
+        base = JSON.parse(readFileSync(seed, "utf8")) as Record<string, unknown>;
+        break;
+      } catch {}
+    }
   }
   base.surface = placement;
-  writeFileSync(configPath, JSON.stringify(base, null, 2) + "\n");
+  mkdirSync(dirname(resolved), { recursive: true });
+  writeFileSync(resolved, JSON.stringify(base, null, 2) + "\n");
 }
 
-function readStatusConfigFile(configPath: string, examplePath: string): { sourcePath: string; rawConfig: string } {
+function readStatusConfigFile(configPath: string, examplePath: string, legacyPath?: string): { sourcePath: string; rawConfig: string } {
   try {
     return { sourcePath: configPath, rawConfig: readFileSync(configPath, "utf8") };
   } catch (error) {
     const errno = error as NodeJS.ErrnoException;
     if (errno.code !== "ENOENT") throw error;
+  }
+
+  if (legacyPath && legacyPath !== configPath) {
+    try {
+      return { sourcePath: legacyPath, rawConfig: readFileSync(legacyPath, "utf8") };
+    } catch (error) {
+      const errno = error as NodeJS.ErrnoException;
+      if (errno.code !== "ENOENT") throw error;
+    }
   }
 
   try {
@@ -220,7 +261,7 @@ function readStatusConfigFile(configPath: string, examplePath: string): { source
     const errno = error as NodeJS.ErrnoException;
     if (errno.code === "ENOENT") {
       throw new Error(
-        `Missing subagent status config. Expected ${configPath} or ${examplePath}.`,
+        `Missing subagent status config. Expected ${configPath}${legacyPath ? `, ${legacyPath},` : ""} or ${examplePath}.`,
       );
     }
     throw error;
@@ -228,10 +269,16 @@ function readStatusConfigFile(configPath: string, examplePath: string): { source
 }
 
 export function loadStatusConfig(
-  configPath = DEFAULT_STATUS_CONFIG_PATH,
+  configPath?: string,
   examplePath = STATUS_CONFIG_EXAMPLE_PATH,
+  legacyPath?: string,
 ): StatusConfig {
-  const { sourcePath, rawConfig } = readStatusConfigFile(configPath, examplePath);
+  const resolved = configPath ?? getDefaultConfigPath();
+  const { sourcePath, rawConfig } = readStatusConfigFile(
+    resolved,
+    examplePath,
+    legacyPath ?? (configPath === undefined ? LEGACY_STATUS_CONFIG_PATH : undefined),
+  );
 
   let parsed: unknown;
   try {

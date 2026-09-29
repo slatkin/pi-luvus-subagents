@@ -113,11 +113,14 @@ These labels are no longer derived from session-file growth. Session JSONL is st
 
 #### Configuration
 
-Status display is controlled by `config.json` in the extension directory. Copy `config.json.example` to get started:
+Status display is controlled by `config.json` in the extension's operating area, `~/.pi/agent/extensions/pi-luvus-subagents/config.json` (under `$PI_CODING_AGENT_DIR` when set — unlike the package root, this survives `pi update`). Seed it from the shipped example:
 
 ```bash
-cp config.json.example config.json
+mkdir -p ~/.pi/agent/extensions/pi-luvus-subagents
+cp config.json.example ~/.pi/agent/extensions/pi-luvus-subagents/config.json
 ```
+
+A `config.json` left at the package root by an older install is still honored on read; the first `/subagent-surface` save migrates it to the new location.
 
 ```json
 {

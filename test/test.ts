@@ -40,6 +40,7 @@ import {
   loadStatusConfig,
   parseStatusConfig,
   parseSurfaceConfig,
+  getDefaultConfigPath,
   loadSurfaceConfig,
   writeSurfaceConfig,
 } from "../pi-extension/subagents/status.ts";
@@ -622,6 +623,50 @@ describe("status.ts", () => {
 
       const saved = JSON.parse(readFileSync(configPath, "utf8"));
       assert.deepEqual(saved, { status: { enabled: true }, surface: "pane" });
+    });
+  });
+
+  it("prefers the extensions-dir config, falling back to the legacy package-root config", () => {
+    withTempDir((dir) => {
+      const configPath = join(dir, "extensions", "pi-luvus-subagents", "config.json");
+      const legacyPath = join(dir, "config.json");
+      const examplePath = join(dir, "config.json.example");
+      writeFileSync(legacyPath, JSON.stringify({ surface: "tab" }));
+
+      assert.equal(loadSurfaceConfig(configPath, examplePath, legacyPath), "tab");
+
+      mkdirSync(join(dir, "extensions", "pi-luvus-subagents"), { recursive: true });
+      writeFileSync(configPath, JSON.stringify({ surface: "pane" }));
+      assert.equal(loadSurfaceConfig(configPath, examplePath, legacyPath), "pane");
+    });
+  });
+
+  it("migrates the legacy config to the new location when persisting the surface", () => {
+    withTempDir((dir) => {
+      const configPath = join(dir, "extensions", "pi-luvus-subagents", "config.json");
+      const legacyPath = join(dir, "config.json");
+      const examplePath = join(dir, "config.json.example");
+      writeFileSync(legacyPath, JSON.stringify({ status: { enabled: false } }, null, 2) + "\n");
+
+      writeSurfaceConfig("tab", configPath, examplePath, legacyPath);
+
+      const saved = JSON.parse(readFileSync(configPath, "utf8"));
+      assert.deepEqual(saved, { status: { enabled: false }, surface: "tab" });
+    });
+  });
+
+  it("resolves the default config under PI_CODING_AGENT_DIR", () => {
+    withTempDir((dir) => {
+      const previous = process.env.PI_CODING_AGENT_DIR;
+      process.env.PI_CODING_AGENT_DIR = dir;
+      try {
+        assert.equal(
+          getDefaultConfigPath(),
+          join(dir, "extensions", "pi-luvus-subagents", "config.json"),
+        );
+      } finally {
+        restoreEnvVar("PI_CODING_AGENT_DIR", previous);
+      }
     });
   });
 

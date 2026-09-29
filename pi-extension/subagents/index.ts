@@ -428,8 +428,9 @@ function getArtifactDir(sessionDir: string, sessionId: string): string {
 const statusConfig = loadStatusConfig();
 
 // Subagent surface placement default: "pane" (split the caller's pane) or
-// "tab" (own workspace tab). Loaded from config.json, changeable at runtime
-// via /subagent-surface, overridable per call via the tool's `surface` param.
+// "tab" (own workspace tab). Loaded from the extension config
+// (~/.pi/agent/extensions/pi-luvus-subagents/config.json), changeable at
+// runtime via /subagent-surface, overridable per call via the tool's `surface` param.
 let surfaceDefault: SurfacePlacement = loadSurfaceConfig();
 
 export function getSurfaceDefault(): SurfacePlacement {
@@ -446,7 +447,7 @@ export function resolveSurfacePlacement(param: unknown): SurfacePlacement {
   return surfaceDefault;
 }
 
-// Test hook: redirect config.json writes away from the package root.
+// Test hook: redirect config.json writes away from the extension config dir.
 let surfaceConfigPath: string | undefined;
 export const __surfaceTest__ = {
   setConfigPath(path: string | undefined) {
