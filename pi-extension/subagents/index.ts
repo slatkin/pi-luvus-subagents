@@ -57,6 +57,11 @@ import {
   type ActivityReadResult,
   type SubagentActivityState,
 } from "./activity.ts";
+import {
+  IDLE_NUDGE_TEXT,
+  decideIdleAction,
+  type IdleWatchState,
+} from "./idle-watchdog.ts";
 
 /** Absolute path to `pi-extension/subagents`. https://github.com/nodejs/node/issues/37845 */
 const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -553,6 +558,8 @@ interface RunningSubagent {
    * subagent's pane (e.g. planner).
    */
   interactive: boolean;
+  /** Parent-side idle watchdog progress (see idle-watchdog.ts). */
+  idleWatch?: IdleWatchState;
 }
 
 /** All currently running subagents, keyed by id. */
@@ -873,6 +880,38 @@ export function readParentMessages(
     }
   }
   return { messages, offset: start + lastNewline + 1 };
+}
+
+/**
+ * Remind, then finish, a non-interactive child that ended its turn but never
+ * exited. Finishing writes the same `done` sidecar `subagent_done` would, so
+ * pollForExit completes the normal way (summary from the session, pane closed).
+ */
+function runIdleWatchdog(running: RunningSubagent, now = Date.now()): void {
+  if (running.cli === "claude" || !running.activity) return;
+  const state = (running.idleWatch ??= { nudges: 0 });
+  const action = decideIdleAction({
+    interactive: running.interactive,
+    phase: running.activity.phase,
+    waitingSince: running.activity.waitingSince,
+    now,
+    state,
+  });
+  if (action === "nudge") {
+    state.nudges += 1;
+    state.lastNudgeAt = now;
+    try {
+      agentPrompt(running.surface, IDLE_NUDGE_TEXT);
+    } catch {
+      // Pane blocked or gone; the nudge still counts so the child is finished.
+    }
+  } else if (action === "finish") {
+    try {
+      writeFileSync(`${running.sessionFile}.exit`, JSON.stringify({ type: "done" }));
+    } catch {
+      // Best effort — the next tick retries.
+    }
+  }
 }
 
 /** Inject any newly written parent-bound messages into this session. */
@@ -1746,6 +1785,7 @@ async function watchSubagent(
       onTick() {
         observeRunningSubagent(running);
         deliverParentMessages(running, pi);
+        runIdleWatchdog(running);
       },
     });
 
