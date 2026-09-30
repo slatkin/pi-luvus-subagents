@@ -25,11 +25,11 @@ When a sub-agent's turn ends with the latest assistant message carrying `stopRea
 - **THEN** the child writes the error `.exit` sidecar and the parent is woken with the failure
 
 ### Requirement: Completion nudge after a normal stop
-When a sub-agent's turn ends normally (the latest assistant message has `stopReason: "stop"`) and `subagent_done` has not been called, the child extension SHALL schedule a nudge: a follow-up message reminding the agent to call `subagent_done`, or `caller_ping` if it is spinning in place. The nudge SHALL be delivered after a delay (default 5 seconds, configurable via `PI_SUBAGENT_NUDGE_DELAY_MS` with a 1-second minimum, disable entirely with `PI_SUBAGENT_NUDGE_DISABLE=1`). Provider-error and aborted stops SHALL NOT schedule a nudge.
+When a sub-agent's turn ends normally (the latest assistant message has `stopReason: "stop"`) and `subagent_done` has not been called, the child extension SHALL schedule a nudge: a follow-up message telling the agent to call `subagent_done` now without restating its report, or `caller_ping` if it is blocked and needs input. The nudge SHALL be delivered after a delay (default 5 seconds, configurable via `PI_SUBAGENT_NUDGE_DELAY_MS` with a 1-second minimum, disable entirely with `PI_SUBAGENT_NUDGE_DISABLE=1`). Provider-error and aborted stops SHALL NOT schedule a nudge.
 
 #### Scenario: Model forgets to call subagent_done
 - **WHEN** the child finishes a turn normally without calling `subagent_done` and stays idle for the nudge delay
-- **THEN** the child receives a follow-up message reminding it to call `subagent_done` (or `caller_ping` when spinning in place)
+- **THEN** the child receives a follow-up message telling it to call `subagent_done` without restating its report (or `caller_ping` when blocked)
 
 #### Scenario: Error stop does not nudge
 - **WHEN** the child's turn ends with `stopReason: "error"`

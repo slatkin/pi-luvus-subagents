@@ -348,10 +348,10 @@ Every sub-agent session exits through an explicit tool call: `subagent_done` to 
 
 To make that reliable, the child extension **nudges itself**: when the agent finishes a turn normally without calling `subagent_done`, it receives a follow-up reminder after 5 seconds:
 
-> [Auto reminder]
-> • Done → call subagent_done to finish.
-> • Before finishing, self-check: are you spinning in place? If so, converge your result immediately and hand it back to the main agent with caller_ping — don't overthink.
-> • Still working → ignore.
+> [Automated reminder] Your last turn ended but this session is still open.
+> If your task is complete, call the subagent_done tool now, with no other text. Your last message was already delivered as your report — do not repeat or summarise it.
+> If you are blocked and need input from the caller, call caller_ping with your question.
+> Otherwise, continue working.
 
 A pending nudge is cancelled when the agent starts new work, the user types into the pane, or the agent calls `subagent_done`/`caller_ping`. Error stops never nudge — they still exit immediately and report the failure to the parent.
 
