@@ -578,11 +578,13 @@ describe("status.ts", () => {
     });
   });
 
-  it("resolves the surface placement default: tab, junk -> pane, absent -> pane", () => {
+  it("resolves the surface placement default: right/down/tab as given, legacy pane, junk and absent -> right", () => {
     assert.equal(parseSurfaceConfig({ surface: "tab" }), "tab");
-    assert.equal(parseSurfaceConfig({ surface: "pane" }), "pane");
-    assert.equal(parseSurfaceConfig({ surface: "junk" }), "pane");
-    assert.equal(parseSurfaceConfig({}), "pane");
+    assert.equal(parseSurfaceConfig({ surface: "down" }), "down");
+    assert.equal(parseSurfaceConfig({ surface: "right" }), "right");
+    assert.equal(parseSurfaceConfig({ surface: "pane" }), "right");
+    assert.equal(parseSurfaceConfig({ surface: "junk" }), "right");
+    assert.equal(parseSurfaceConfig({}), "right");
   });
 
   it("loads the surface placement from a temp config file", () => {
@@ -593,9 +595,9 @@ describe("status.ts", () => {
       assert.equal(loadSurfaceConfig(configPath, examplePath), "tab");
 
       writeFileSync(configPath, JSON.stringify({ surface: "junk" }));
-      assert.equal(loadSurfaceConfig(configPath, examplePath), "pane");
+      assert.equal(loadSurfaceConfig(configPath, examplePath), "right");
 
-      assert.equal(loadSurfaceConfig(join(dir, "missing.json"), examplePath), "pane");
+      assert.equal(loadSurfaceConfig(join(dir, "missing.json"), examplePath), "right");
     });
   });
 
@@ -619,10 +621,10 @@ describe("status.ts", () => {
       const examplePath = join(dir, "config.json.example");
       writeFileSync(examplePath, JSON.stringify({ status: { enabled: true } }, null, 2) + "\n");
 
-      writeSurfaceConfig("pane", configPath, examplePath);
+      writeSurfaceConfig("down", configPath, examplePath);
 
       const saved = JSON.parse(readFileSync(configPath, "utf8"));
-      assert.deepEqual(saved, { status: { enabled: true }, surface: "pane" });
+      assert.deepEqual(saved, { status: { enabled: true }, surface: "down" });
     });
   });
 
@@ -636,8 +638,8 @@ describe("status.ts", () => {
       assert.equal(loadSurfaceConfig(configPath, examplePath, legacyPath), "tab");
 
       mkdirSync(join(dir, "extensions", "pi-luvus-subagents"), { recursive: true });
-      writeFileSync(configPath, JSON.stringify({ surface: "pane" }));
-      assert.equal(loadSurfaceConfig(configPath, examplePath, legacyPath), "pane");
+      writeFileSync(configPath, JSON.stringify({ surface: "down" }));
+      assert.equal(loadSurfaceConfig(configPath, examplePath, legacyPath), "down");
     });
   });
 
@@ -981,10 +983,11 @@ describe("surface placement resolution", () => {
     try {
       subagentsModule.setSurfaceDefault("tab");
       assert.equal(subagentsModule.resolveSurfacePlacement(undefined), "tab");
-      assert.equal(subagentsModule.resolveSurfacePlacement("pane"), "pane");
+      assert.equal(subagentsModule.resolveSurfacePlacement("down"), "down");
+      assert.equal(subagentsModule.resolveSurfacePlacement("pane"), "right");
 
-      subagentsModule.setSurfaceDefault("pane");
-      assert.equal(subagentsModule.resolveSurfacePlacement("junk"), "pane");
+      subagentsModule.setSurfaceDefault("down");
+      assert.equal(subagentsModule.resolveSurfacePlacement("junk"), "down");
       assert.equal(subagentsModule.resolveSurfacePlacement("tab"), "tab");
     } finally {
       subagentsModule.setSurfaceDefault(saved);
@@ -1673,7 +1676,7 @@ describe("subagent-surface command", () => {
     const { command, notifications, ctx } = loadCommand();
     command.handler("", ctx);
     assert.equal(notifications.length, 1);
-    assert.match(notifications[0].message, /^Subagent surface: (pane|tab)$/);
+    assert.match(notifications[0].message, /^Subagent surface: (right|down|tab)$/);
   });
 
   it("sets a valid placement, persists it, and reports the new value", () => {
@@ -1707,7 +1710,7 @@ describe("subagent-surface command", () => {
       command.handler("window", ctx);
       assert.equal(subagentsModule.getSurfaceDefault(), saved);
       assert.equal(notifications[0].level, "warning");
-      assert.match(notifications[0].message, /accepted: pane, tab/);
+      assert.match(notifications[0].message, /accepted: right, down, tab/);
     } finally {
       subagentsModule.setSurfaceDefault(saved);
     }
@@ -2923,7 +2926,7 @@ esac
     );
     assert.equal(surface, "24");
     assert.deepEqual(readFileSync(log, "utf8").trim().split("\n"), [
-      "pane split 21 --no-focus",
+      "pane split 21 --right --no-focus",
       "pane name scout --pane 24",
     ]);
   });
@@ -2958,7 +2961,7 @@ esac
     assert.equal(surface, "24");
     assert.deepEqual(readFileSync(log, "utf8").trim().split("\n"), [
       "agent list",
-      "pane split 21 --no-focus",
+      "pane split 21 --right --no-focus",
       "pane name scout --pane 24",
       "pane move 24 --new-tab",
       "tab focus 1",
@@ -3020,14 +3023,24 @@ esac
     assert.ok(calls.includes("tab focus 1"));
   });
 
-  it("createSurface pane placement never calls agent list", () => {
+  it("createSurface right placement never calls agent list", () => {
     const log = join(stubDir, "calls-plainpane.log");
     withLuvusEnv(
       allLuvusKeys({ LUVUS_ENV: "1", LUVUS_BIN_PATH: stubPath, LUVUS_PANE_ID: "21", LUVUS_STUB_LOG: log }),
-      () => createSurface("Scout", "pane"),
+      () => createSurface("Scout", "right"),
     );
     const calls = readFileSync(log, "utf8").trim().split("\n");
-    assert.deepEqual(calls, ["pane split 21 --no-focus", "pane name scout --pane 24"]);
+    assert.deepEqual(calls, ["pane split 21 --right --no-focus", "pane name scout --pane 24"]);
+  });
+
+  it("createSurface down placement stacks the pane below the caller", () => {
+    const log = join(stubDir, "calls-down.log");
+    withLuvusEnv(
+      allLuvusKeys({ LUVUS_ENV: "1", LUVUS_BIN_PATH: stubPath, LUVUS_PANE_ID: "21", LUVUS_STUB_LOG: log }),
+      () => createSurface("Scout", "down"),
+    );
+    const calls = readFileSync(log, "utf8").trim().split("\n");
+    assert.deepEqual(calls, ["pane split 21 --down --no-focus", "pane name scout --pane 24"]);
   });
 
   it("surfaces the Luvus .error message as an Error", () => {

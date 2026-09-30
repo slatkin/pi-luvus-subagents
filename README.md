@@ -127,13 +127,13 @@ A `config.json` left at the package root by an older install is still honored on
   "status": {
     "enabled": true
   },
-  "surface": "pane"
+  "surface": "right"
 }
 ```
 
 `config.json` is gitignored so local overrides don't get committed.
 
-Set `"surface": "tab"` to open subagents in their own workspace tab instead of splitting your pane (focus always returns to your pane). Change it live with `/subagent-surface pane|tab`, or override a single spawn with the `subagent` tool's `surface` parameter.
+`"surface"` controls where subagents open: `"right"` (default) splits your pane side by side, `"down"` stacks the subagent below, and `"tab"` gives it its own workspace tab (focus always returns to your pane). The older value `"pane"` is still accepted and means `"right"`. Change it live with `/subagent-surface right|down|tab`, or override a single spawn with the `subagent` tool's `surface` parameter.
 
 ---
 
@@ -167,7 +167,7 @@ subagent({ name: "Designer", agent: "game-designer", cwd: "agents/game-designer"
 | `skills`               | string  | —              | Comma-separated skill names                                                                       |
 | `tools`                | string  | —              | Comma-separated tool names                                                                        |
 | `cwd`                  | string  | —              | Working directory for the sub-agent (see [Role Folders](#role-folders))                           |
-| `surface`              | string  | config default | `"pane"` splits the caller's pane; `"tab"` opens the subagent in its own workspace tab (focus always returns to the caller). Overrides the `surface` key in `config.json` for this spawn. |
+| `surface`              | string  | config default | `"right"` (default) splits the caller's pane side by side; `"down"` stacks it below; `"tab"` opens the subagent in its own workspace tab (focus always returns to the caller). `"pane"` is an alias for `"right"`. Overrides the `surface` key in `config.json` for this spawn. |
 
 ---
 
@@ -228,7 +228,7 @@ The `caller_ping` tool lets a subagent request help from its parent agent. When 
 - `name` (optional): Display name for the resumed pane (defaults to `Resume`)
 - `message` (optional): Follow-up prompt to send after resuming
 - `autoExit` (optional): Whether the resumed session should auto-exit after its next response. Defaults to `true` for autonomous follow-up work; set `false` when resuming for an interactive handoff.
-- `surface` (optional): `"pane"` (default) splits the caller's pane; `"tab"` opens the resumed session in its own workspace tab. Overrides the `surface` key in `config.json` for this resume.
+- `surface` (optional): `"right"` (default) splits the caller's pane side by side; `"down"` stacks it below; `"tab"` opens the resumed session in its own workspace tab. Overrides the `surface` key in `config.json` for this resume.
 
 **Interaction flow:**
 1. Child calls `caller_ping({ message: "Not sure which schema to use" })`

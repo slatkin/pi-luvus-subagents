@@ -2,5 +2,5 @@
   "status": {
     "enabled": true
   },
-  "surface": "pane"
+  "surface": "right"
 }

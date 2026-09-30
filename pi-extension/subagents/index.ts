@@ -28,6 +28,7 @@ import {
   shellEscape,
   readScreen,
   agentPrompt,
+  parseSurfacePlacement,
   type SurfacePlacement,
 } from "./luvus.ts";
 
@@ -132,9 +133,9 @@ const SubagentParams = Type.Object({
     }),
   ),
   surface: Type.Optional(
-    Type.Union([Type.Literal("pane"), Type.Literal("tab")], {
+    Type.Union([Type.Literal("right"), Type.Literal("down"), Type.Literal("tab"), Type.Literal("pane")], {
       description:
-        'Where to open the subagent: "pane" splits this pane (default), "tab" gives the subagent its own workspace tab with focus returned here. Overrides the configured default for this spawn only.',
+        'Where to open the subagent: "right" splits this pane side by side (default), "down" stacks it below, "tab" gives the subagent its own workspace tab with focus returned here ("pane" is an alias for the default split). Overrides the configured default for this spawn only.',
     }),
   ),
 });
@@ -427,8 +428,8 @@ function getArtifactDir(sessionDir: string, sessionId: string): string {
 
 const statusConfig = loadStatusConfig();
 
-// Subagent surface placement default: "pane" (split the caller's pane) or
-// "tab" (own workspace tab). Loaded from the extension config
+// Subagent surface placement default: "right" (side-by-side split), "down"
+// (stacked split) or "tab" (own workspace tab). Loaded from the extension config
 // (~/.pi/agent/extensions/pi-luvus-subagents/config.json), changeable at
 // runtime via /subagent-surface, overridable per call via the tool's `surface` param.
 let surfaceDefault: SurfacePlacement = loadSurfaceConfig();
@@ -443,8 +444,7 @@ export function setSurfaceDefault(value: SurfacePlacement): void {
 
 /** Resolve placement for one spawn: explicit tool param > configured default. */
 export function resolveSurfacePlacement(param: unknown): SurfacePlacement {
-  if (param === "pane" || param === "tab") return param;
-  return surfaceDefault;
+  return parseSurfacePlacement(param) ?? surfaceDefault;
 }
 
 // Test hook: redirect config.json writes away from the extension config dir.
@@ -1459,7 +1459,7 @@ async function launchSubagent(
   // Use pre-created surface (parallel mode) or create a new one.
   // For new surfaces, pause briefly so the shell is ready before sending the command.
   const surfacePreCreated = !!options?.surface;
-  const surface = options?.surface ?? createSurface(params.name, options?.placement ?? "pane");
+  const surface = options?.surface ?? createSurface(params.name, options?.placement);
   if (!surfacePreCreated) {
     await new Promise<void>((resolve) => setTimeout(resolve, getShellReadyDelayMs()));
   }
@@ -1910,7 +1910,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         "DO NOT write polling loops, sleep/wait commands, tail/watch scripts, or repeatedly read session/log files to detect completion. DO NOT call subagents_list or any other tool to 'check' status. All of that is wasted work — the harness handles delivery for you. " +
         "DO NOT fabricate, assume, or summarize results after calling this tool. " +
         "After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you with the result when it is ready. " +
-        'Placement: optional surface parameter — "pane" (default) splits this pane, "tab" gives the sub-agent its own workspace tab; either way keyboard focus stays on this pane (tab placement restores it).',
+        'Placement: optional surface parameter — "right" (default) splits this pane side by side, "down" stacks it below, "tab" gives the sub-agent its own workspace tab; either way keyboard focus stays on this pane (tab placement restores it).',
       promptSnippet:
         "Spawn a sub-agent in a dedicated terminal multiplexer pane or its own tab. " +
         "This is a fire-and-forget async tool: the call returns immediately with only an acknowledgement. " +
@@ -1918,7 +1918,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         "DO NOT write polling loops, sleep/wait commands, tail/watch scripts, or repeatedly read session/log files to detect completion. DO NOT call subagents_list or any other tool to 'check' status. All of that is wasted work — the harness handles delivery for you. " +
         "DO NOT fabricate, assume, or summarize results after calling this tool. " +
         "After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you with the result when it is ready. " +
-        'Placement: optional surface parameter — "pane" (default) splits this pane, "tab" gives the sub-agent its own workspace tab; either way keyboard focus stays on this pane (tab placement restores it).',
+        'Placement: optional surface parameter — "right" (default) splits this pane side by side, "down" stacks it below, "tab" gives the sub-agent its own workspace tab; either way keyboard focus stays on this pane (tab placement restores it).',
       parameters: SubagentParams,
 
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -2312,7 +2312,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         "DO NOT write polling loops, sleep/wait commands, tail/watch scripts, or repeatedly read session/log files to detect completion. DO NOT poll for status. All of that is wasted work — the harness handles delivery for you. " +
         "DO NOT fabricate or assume results. After resuming, either end your turn or work on other independent tasks; the harness will wake you when the result is ready. " +
         "Use when a sub-agent was cancelled or needs follow-up work. " +
-        'Placement: optional surface parameter — "pane" (default) splits this pane, "tab" gives the resumed session its own workspace tab; either way keyboard focus stays on this pane (tab placement restores it).',
+        'Placement: optional surface parameter — "right" (default) splits this pane side by side, "down" stacks it below, "tab" gives the resumed session its own workspace tab; either way keyboard focus stays on this pane (tab placement restores it).',
       promptSnippet:
         "Resume a previous sub-agent session in a new multiplexer pane or its own tab. " +
         "This is a fire-and-forget async tool: the call returns immediately with only an acknowledgement. " +
@@ -2320,16 +2320,16 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         "DO NOT write polling loops, sleep/wait commands, tail/watch scripts, or repeatedly read session/log files to detect completion. DO NOT poll for status. All of that is wasted work — the harness handles delivery for you. " +
         "DO NOT fabricate or assume results. After resuming, either end your turn or work on other independent tasks; the harness will wake you when the result is ready. " +
         "Use when a sub-agent was cancelled or needs follow-up work. " +
-        'Placement: optional surface parameter — "pane" (default) splits this pane, "tab" gives the resumed session its own workspace tab; either way keyboard focus stays on this pane (tab placement restores it).',
+        'Placement: optional surface parameter — "right" (default) splits this pane side by side, "down" stacks it below, "tab" gives the resumed session its own workspace tab; either way keyboard focus stays on this pane (tab placement restores it).',
       parameters: Type.Object({
         sessionPath: Type.String({ description: "Path to the session .jsonl file to resume" }),
         name: Type.Optional(
           Type.String({ description: "Display name for the terminal tab. Default: 'Resume'" }),
         ),
         surface: Type.Optional(
-          Type.Union([Type.Literal("pane"), Type.Literal("tab")], {
+          Type.Union([Type.Literal("right"), Type.Literal("down"), Type.Literal("tab"), Type.Literal("pane")], {
             description:
-              'Where to open the resumed session: "pane" splits this pane (default), "tab" gives it its own workspace tab with focus returned here. Overrides the configured default for this spawn only.',
+              'Where to open the resumed session: "right" splits this pane side by side (default), "down" stacks it below, "tab" gives it its own workspace tab with focus returned here ("pane" is an alias for the default split). Overrides the configured default for this spawn only.',
           }),
         ),
         message: Type.Optional(
@@ -2611,17 +2611,18 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
   // /subagent-surface command — show or set the default surface placement
   pi.registerCommand("subagent-surface", {
-    description: "Show or set the default subagent surface: /subagent-surface [pane|tab]",
+    description: "Show or set the default subagent surface: /subagent-surface [right|down|tab]",
     handler: async (args, ctx) => {
       const arg = args.trim().toLowerCase();
-      if (arg === "pane" || arg === "tab") {
-        setSurfaceDefault(arg);
+      const placement = parseSurfacePlacement(arg);
+      if (placement) {
+        setSurfaceDefault(placement);
         try {
-          writeSurfaceConfig(arg, surfaceConfigPath);
-          ctx.ui.notify(`Subagent surface set to "${arg}" (saved to config.json).`, "info");
+          writeSurfaceConfig(placement, surfaceConfigPath);
+          ctx.ui.notify(`Subagent surface set to "${placement}" (saved to config.json).`, "info");
         } catch (error) {
           ctx.ui.notify(
-            `Subagent surface set to "${arg}" for this session, but saving to config.json failed: ${
+            `Subagent surface set to "${placement}" for this session, but saving to config.json failed: ${
               error instanceof Error ? error.message : String(error)
             }`,
             "warning",
@@ -2630,7 +2631,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       } else if (arg === "") {
         ctx.ui.notify(`Subagent surface: ${getSurfaceDefault()}`, "info");
       } else {
-        ctx.ui.notify(`Subagent surface: ${getSurfaceDefault()} (accepted: pane, tab)`, "warning");
+        ctx.ui.notify(`Subagent surface: ${getSurfaceDefault()} (accepted: right, down, tab)`, "warning");
       }
     },
   });
