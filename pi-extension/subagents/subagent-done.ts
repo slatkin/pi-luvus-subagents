@@ -290,6 +290,9 @@ export default function (pi: ExtensionAPI) {
     }
 
     recorder.agentEndWaiting();
+    // Only input arriving after this point counts as a takeover; input that
+    // landed mid-run (e.g. subagent_message) must not silence the nudge.
+    userInputAfterAgentEnd = false;
     // Auto-exit is removed: a normal stop leaves the session open and nudges
     // the agent to call subagent_done if it forgot. Aborted stops stay quiet.
     if (shouldScheduleAgentEndNudge(messages)) {
