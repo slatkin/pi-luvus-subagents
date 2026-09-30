@@ -1589,6 +1589,23 @@ describe("subagent-done nudge", () => {
       }
     });
   });
+
+  it("input that arrives mid-run does not silence the nudge", async () => {
+    await withTempDir(async (_dir) => {
+      const { handlers, sentMessages, restoreEnv } = loadChildExtension({
+        PI_SUBAGENT_NUDGE_DELAY_MS: "1000",
+      });
+      try {
+        fire(handlers, "agent_start");
+        fire(handlers, "input");
+        fire(handlers, "agent_end", { messages: [{ role: "assistant", stopReason: "stop" }] }, { shutdown() {} });
+        await new Promise((resolve) => setTimeout(resolve, 1100));
+        assert.equal(sentMessages.length, 1);
+      } finally {
+        restoreEnv();
+      }
+    });
+  });
 });
 
 describe("luvus.ts interpretExitSidecar", () => {

@@ -130,11 +130,11 @@ export default function (pi: ExtensionAPI) {
   /** Set to "1" to disable the nudge entirely. */
   const NUDGE_DISABLED = process.env.PI_SUBAGENT_NUDGE_DISABLE === "1";
   const NUDGE_TEXT =
-    "[Auto reminder]\n" +
-    "• Done → call subagent_done to finish.\n" +
-    "• Before finishing, self-check: are you spinning in place? If so, converge your result " +
-    "immediately and hand it back to the main agent with caller_ping — don't overthink.\n" +
-    "• Still working → ignore.";
+    "[Automated reminder] Your last turn ended but this session is still open.\n" +
+    "If your task is complete, call the subagent_done tool now, with no other text. " +
+    "Your last message was already delivered as your report — do not repeat or summarise it.\n" +
+    "If you are blocked and need input from the caller, call caller_ping with your question.\n" +
+    "Otherwise, continue working.";
 
   let doneCalled = false;
   let userInputAfterAgentEnd = false;
@@ -290,6 +290,9 @@ export default function (pi: ExtensionAPI) {
     }
 
     recorder.agentEndWaiting();
+    // Only input arriving after this point counts as a takeover; input that
+    // landed mid-run (e.g. subagent_message) must not silence the nudge.
+    userInputAfterAgentEnd = false;
     // Auto-exit is removed: a normal stop leaves the session open and nudges
     // the agent to call subagent_done if it forgot. Aborted stops stay quiet.
     if (shouldScheduleAgentEndNudge(messages)) {

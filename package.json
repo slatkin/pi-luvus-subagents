@@ -6,10 +6,10 @@
     "pi-package"
   ],
   "license": "MIT",
-  "author": "HazAT",
+  "author": "slatkin",
   "repository": {
     "type": "git",
-    "url": "https://github.com/HazAT/pi-interactive-subagents"
+    "url": "https://github.com/slatkin/pi-luvus-subagents"
   },
   "type": "module",
   "scripts": {
