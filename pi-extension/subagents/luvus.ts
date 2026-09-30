@@ -114,8 +114,19 @@ function paneReadText(result: LuvusResult): string {
   return text;
 }
 
-/** Surface placement for a subagent: a split of the caller's pane, or its own tab. */
-export type SurfacePlacement = "pane" | "tab";
+/**
+ * Surface placement for a subagent: a split of the caller's pane to the right
+ * (side by side) or down (stacked), or its own tab.
+ */
+export type SurfacePlacement = "right" | "down" | "tab";
+
+export const DEFAULT_SURFACE_PLACEMENT: SurfacePlacement = "right";
+
+/** Parse a placement value. The legacy "pane" (auto split) means the default split. */
+export function parseSurfacePlacement(value: unknown): SurfacePlacement | undefined {
+  if (value === "pane") return DEFAULT_SURFACE_PLACEMENT;
+  return value === "right" || value === "down" || value === "tab" ? value : undefined;
+}
 
 /**
  * Find the tab hosting the caller's pane via `agent list` (entries carry
@@ -137,14 +148,14 @@ function findCallerTab(caller: string): string | null {
 }
 
 /**
- * Create a new terminal surface for a subagent. Pane placement (the default)
- * splits the caller's pane (`$LUVUS_PANE_ID`) without taking focus. Tab
+ * Create a new terminal surface for a subagent. Right/down placement splits
+ * the caller's pane (`$LUVUS_PANE_ID`) without taking focus. Tab
  * placement additionally moves the new pane to its own workspace tab and then
  * restores focus to the caller's tab, because `pane move --new-tab` always
  * focuses the moved pane (no --no-focus exists on `pane move` or `tab new`).
  * Returns the new pane id — valid for pane run/read/close regardless of tab.
  */
-export function createSurface(name: string, placement: SurfacePlacement = "pane"): string {
+export function createSurface(name: string, placement: SurfacePlacement = DEFAULT_SURFACE_PLACEMENT): string {
   const caller = process.env.LUVUS_PANE_ID;
   if (!caller) {
     throw new Error("LUVUS_PANE_ID is not set. Start pi inside a Luvus pane.");
@@ -155,7 +166,7 @@ export function createSurface(name: string, placement: SurfacePlacement = "pane"
   // tab. An unknown caller tab downgrades the spawn to pane placement.
   const callerTab = placement === "tab" ? findCallerTab(caller) : null;
 
-  const result = luvus(["pane", "split", caller, "--no-focus"]);
+  const result = luvus(["pane", "split", caller, placement === "down" ? "--down" : "--right", "--no-focus"]);
   // Verified live (fixture in test/test.ts): the new pane id is `result.pane`.
   const { pane } = result;
   if (pane === undefined || pane === null || pane === "") {

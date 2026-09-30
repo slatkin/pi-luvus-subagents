@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { SurfacePlacement } from "./luvus.ts";
+import { DEFAULT_SURFACE_PLACEMENT, parseSurfacePlacement, type SurfacePlacement } from "./luvus.ts";
 
 export const SNAPSHOT_STALLED_AFTER_MS = 60_000;
 export const DEFAULT_STATUS_LINE_LIMIT = 4;
@@ -176,13 +176,13 @@ export function parseSurfaceConfig(rawConfig: unknown, source = "config.json"): 
     invalidStatusConfig(source, "root must be an object");
   }
   const surface = (rawConfig as Record<string, unknown>).surface;
-  return surface === "tab" ? "tab" : "pane";
+  return parseSurfacePlacement(surface) ?? DEFAULT_SURFACE_PLACEMENT;
 }
 
 /**
  * Load the `surface` placement default from the extension config. Unlike the
  * status config, a missing or unreadable file is not fatal — it just means
- * "pane", today's behavior.
+ * the default placement.
  */
 export function loadSurfaceConfig(
   configPath?: string,
@@ -197,7 +197,7 @@ export function loadSurfaceConfig(
     );
     return parseSurfaceConfig(JSON.parse(rawConfig), sourcePath);
   } catch {
-    return "pane";
+    return DEFAULT_SURFACE_PLACEMENT;
   }
 }
 
