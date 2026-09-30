@@ -362,6 +362,8 @@ Configure the nudge with environment variables (read by the child at launch):
 | `PI_SUBAGENT_NUDGE_DELAY_MS` | `5000` | Delay before the reminder (minimum 1000)             |
 | `PI_SUBAGENT_NUDGE_DISABLE`  | unset  | Set to `1` to disable the nudge entirely              |
 
+**Parent-side idle watchdog.** The child's nudge depends on the child and the model, so the parent backs it up. For non-interactive subagents, if the child's activity file has said `waiting` (turn ended) for 30 seconds without the session exiting, the parent types a reminder into the pane itself. After two such reminders, if the child is still waiting another 30 seconds, the parent finishes it as if `subagent_done` had been called: the last assistant message becomes the result and the pane is closed. Interactive subagents (for example `planner`) are never touched. The timings live in `pi-extension/subagents/idle-watchdog.ts`.
+
 **What `auto-exit: true` still does** — it no longer terminates anything. It shapes defaults:
 
 - The task hint tells the agent upfront to call `subagent_done` when finished ("Complete your task autonomously. Call subagent_done when finished.")
