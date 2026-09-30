@@ -13,9 +13,11 @@ export const IDLE_STEP_MS = 30_000;
 export const IDLE_MAX_NUDGES = 2;
 
 export const IDLE_NUDGE_TEXT =
-  "[Auto reminder from the orchestrator]\n" +
-  "Your turn has ended but the session is still open. If your task is complete, call subagent_done now. " +
-  "If you need input from the caller, call caller_ping. If you are not finished, continue working.";
+  "[Automated reminder] Your last turn ended but this session is still open.\n" +
+  "If your task is complete, call the subagent_done tool now, with no other text. " +
+  "Your last message was already delivered as your report — do not repeat or summarise it.\n" +
+  "If you are blocked and need input from the caller, call caller_ping with your question.\n" +
+  "Otherwise, continue working.";
 
 export type IdleAction = "none" | "nudge" | "finish";
 
