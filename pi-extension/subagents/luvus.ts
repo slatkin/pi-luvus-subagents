@@ -131,7 +131,11 @@ export function buildOscTitleLine(name: string, task?: string): string {
     .replace(OSC_TITLE_CONTROL_CHARS, "")
     .trim();
   const title = taskText.length > 0 ? `${cleanName} — ${taskText.slice(0, 48)}` : cleanName;
-  return `printf '\\033]2;%s\\007' ${shellEscape(title)}`;
+  // 8s is a fixed heuristic: pi wipes a title emitted before it boots (it
+  // enters the alternate screen), so emit it late and backgrounded. If pi
+  // boots slower the title lands mid-boot and is wiped again — upgrade path
+  // is a longer delay or polling for readiness.
+  return `( sleep 8; printf '\\033]2;%s\\007' ${shellEscape(title)} ) &`;
 }
 
 function paneReadText(result: LuvusResult): string {
