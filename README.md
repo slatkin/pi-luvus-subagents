@@ -8,6 +8,8 @@ This is a Luvus-only fork of [HazAT/pi-interactive-subagents](https://github.com
 
 Call `subagent()` and it **returns immediately**. The sub-agent runs in its own Luvus pane, split from the caller's pane without stealing focus. A live widget above the input shows all running agents with their current state — `starting`, `active`, `waiting`, `stalled`, or `running`. When a sub-agent finishes, its result is **steered back** into the main session as an async notification — triggering a new turn so the agent can process it.
 
+Each subagent pane also carries an OSC 2 title of `<name> — <task>`, where `<task>` is the first non-empty line of the task (truncated to 48 characters; just the name when there is no task text). Luvus's AGENTS sidebar shows this live title on the row's second line, so parallel subagent panes are distinguishable at a glance. The title is additive: `luvus pane name` still sets the pane alias, and `=name` references keep working unchanged.
+
 ```
 ╭─ Subagents ──────────────────────────── 2 running ─╮
 │ 00:23  Scout: Auth (scout)        active · bash 7m │
