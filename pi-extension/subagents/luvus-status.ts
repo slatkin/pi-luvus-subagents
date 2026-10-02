@@ -43,6 +43,21 @@ export function buildReleaseArgs(pane: string): string[] {
   return ["agent", "release", pane, "--source", LUVUS_STATUS_SOURCE];
 }
 
+/** Bind the pane to pi's native session id so Mission Control usage and
+ *  resume work. pi publishes its session file via PI_SESSION_FILE; the id is
+ *  the uuid after the timestamp prefix in the basename. */
+export function piSessionId(env: NodeJS.ProcessEnv = process.env): string | null {
+  const file = env.PI_SESSION_FILE;
+  if (!file) return null;
+  const base = file.split("/").pop() ?? "";
+  const id = base.replace(/\.jsonl$/, "").split("_").pop() ?? "";
+  return id || null;
+}
+
+export function buildSessionBindArgs(pane: string, sessionId: string): string[] {
+  return ["pane", "report", pane, "--agent", "pi", "--session", sessionId];
+}
+
 /** The caller's pane when pi runs inside Luvus, else null (same env check
  *  as isMuxAvailable in luvus.ts, plus the pane id self-reports target). */
 export function luvusStatusPane(env: NodeJS.ProcessEnv = process.env): string | null {
@@ -86,11 +101,25 @@ export function createLuvusStatusReporter(
     }
   }
 
+  function bindSession(): void {
+    const pane = luvusStatusPane(env);
+    const sessionId = piSessionId(env);
+    if (!pane || !sessionId) return;
+    try {
+      exec(env.LUVUS_BIN_PATH as string, buildSessionBindArgs(pane, sessionId));
+    } catch {
+      // Best effort — Mission Control usage stays unbound until next start.
+    }
+  }
+
   function register(pi: ExtensionAPI): void {
     const global = globalThis as Record<string, unknown>;
     if (global[REGISTERED_KEY]) return;
     global[REGISTERED_KEY] = true;
-    pi.on("session_start", () => report("idle"));
+    pi.on("session_start", () => {
+      bindSession();
+      report("idle");
+    });
     pi.on("agent_start", () => report("working"));
     pi.on("turn_start", () => report("working"));
     pi.on("agent_end", () => report("idle"));

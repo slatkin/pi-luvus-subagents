@@ -3,12 +3,14 @@ import assert from "node:assert/strict";
 import {
   buildReleaseArgs,
   buildReportArgs,
+  buildSessionBindArgs,
   createLuvusStatusReporter,
   LUVUS_STATUS_SOURCE,
   LUVUS_STATUS_TTL_S,
+  piSessionId,
 } from "../pi-extension/subagents/luvus-status.ts";
 
-const ENV = { LUVUS_ENV: "1", LUVUS_BIN_PATH: "/bin/luvus", LUVUS_PANE_ID: "7" };
+const ENV = { LUVUS_ENV: "1", LUVUS_BIN_PATH: "/bin/luvus", LUVUS_PANE_ID: "7", PI_SESSION_FILE: "/tmp/2026-10-02T15-25-11-301Z_abc.jsonl" };
 
 function makePi() {
   const handlers = new Map<string, Array<() => void>>();
@@ -48,11 +50,20 @@ describe("luvus-status reporter", () => {
     target.fire("agent_end");
     target.fire("session_shutdown");
     assert.deepEqual(calls, [
+      buildSessionBindArgs("7", "abc"),
       buildReportArgs("7", "idle"),
       buildReportArgs("7", "working"),
       buildReportArgs("7", "idle"),
       buildReleaseArgs("7"),
     ]);
+  });
+
+  it("binds the pi session id from PI_SESSION_FILE", () => {
+    assert.equal(
+      piSessionId({ PI_SESSION_FILE: "/home/x/.pi/agent/sessions/--home--/2026-10-02T15-25-11-301Z_01a0fd38-2905-7368-b9f5-a30c7bd41580.jsonl" }),
+      "01a0fd38-2905-7368-b9f5-a30c7bd41580",
+    );
+    assert.equal(piSessionId({}), null);
   });
 
   it("sends nothing outside a Luvus pane", () => {
