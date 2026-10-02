@@ -15,5 +15,5 @@
 
 ## 4. Verification
 
-- [ ] 4.1 `npm test` green; `npx tsc --noEmit` clean.
-- [ ] 4.2 Manual check: spawn a subagent, confirm its AGENTS sidebar row shows the `name — task` title (second line), and `/reload` cleanliness.
+- [x] 4.1 `npm test` green; `npx tsc --noEmit` clean.
+- [x] 4.2 Manual check: spawn a subagent, confirm its AGENTS sidebar row shows the `name — task` title (second line), and `/reload` cleanliness.
