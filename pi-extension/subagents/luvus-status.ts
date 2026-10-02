@@ -19,8 +19,16 @@ export const LUVUS_STATUS_SOURCE = "pi-luvus-status";
  *  backstop is safe even for long turns (worst case after kill -9). */
 export const LUVUS_STATUS_TTL_S = 300;
 
-const REGISTERED_KEY = "__piLuvusStatusRegistered";
+/** Module-level, so it dies with the extension runtime on /reload — a
+ *  globalThis flag would survive the runtime replacement and leave the
+ *  reloaded extension with no listeners at all. Within one runtime, index.ts
+ *  and subagent-done.ts share the module instance, so this still dedupes. */
+let registeredInRuntime = false;
 
+/** Test hook: reset the per-runtime registration guard. */
+export function __resetRegistrationForTests__(): void {
+  registeredInRuntime = false;
+}
 export type LuvusAgentStatus = "working" | "idle";
 
 export function buildReportArgs(pane: string, status: LuvusAgentStatus): string[] {
@@ -101,9 +109,8 @@ export function createLuvusStatusReporter(
     }
   }
 
-  function bindSession(): void {
+  function bindSession(sessionId: string | null): void {
     const pane = luvusStatusPane(env);
-    const sessionId = piSessionId(env);
     if (!pane || !sessionId) return;
     try {
       exec(env.LUVUS_BIN_PATH as string, buildSessionBindArgs(pane, sessionId));
@@ -113,11 +120,15 @@ export function createLuvusStatusReporter(
   }
 
   function register(pi: ExtensionAPI): void {
-    const global = globalThis as Record<string, unknown>;
-    if (global[REGISTERED_KEY]) return;
-    global[REGISTERED_KEY] = true;
-    pi.on("session_start", () => {
-      bindSession();
+    if (registeredInRuntime) return;
+    registeredInRuntime = true;
+    pi.on("session_start", (_event, ctx) => {
+      // pi injects PI_SESSION_FILE only into spawned children, not into its own
+      // process env — read the live id from the session manager.
+      const id =
+        (ctx as { sessionManager?: { getSessionId?: () => string | null } } | undefined)?.sessionManager?.getSessionId?.() ??
+        piSessionId(env);
+      bindSession(id || null);
       report("idle");
     });
     pi.on("agent_start", () => report("working"));

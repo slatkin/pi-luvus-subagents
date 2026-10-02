@@ -8,19 +8,21 @@ import {
   LUVUS_STATUS_SOURCE,
   LUVUS_STATUS_TTL_S,
   piSessionId,
+  __resetRegistrationForTests__,
 } from "../pi-extension/subagents/luvus-status.ts";
 
 const ENV = { LUVUS_ENV: "1", LUVUS_BIN_PATH: "/bin/luvus", LUVUS_PANE_ID: "7", PI_SESSION_FILE: "/tmp/2026-10-02T15-25-11-301Z_abc.jsonl" };
+const CTX = { sessionManager: { getSessionId: () => "sess-1" } };
 
 function makePi() {
-  const handlers = new Map<string, Array<() => void>>();
+  const handlers = new Map<string, Array<(a?: unknown, b?: unknown) => void>>();
   return {
     handlers,
-    pi: { on: (event: string, fn: () => void) => {
+    pi: { on: (event: string, fn: (a?: unknown, b?: unknown) => void) => {
       handlers.set(event, [...(handlers.get(event) ?? []), fn]);
     } },
-    fire(event: string) {
-      for (const fn of handlers.get(event) ?? []) fn();
+    fire(event: string, ctx?: unknown) {
+      for (const fn of handlers.get(event) ?? []) fn(undefined, ctx);
     },
   };
 }
@@ -36,7 +38,7 @@ function makeExec() {
 }
 
 beforeEach(() => {
-  delete (globalThis as Record<string, unknown>).__piLuvusStatusRegistered;
+  __resetRegistrationForTests__();
 });
 
 describe("luvus-status reporter", () => {
@@ -44,13 +46,13 @@ describe("luvus-status reporter", () => {
     const { calls, exec } = makeExec();
     const target = makePi();
     createLuvusStatusReporter(exec, { ...ENV }).register(target.pi as never);
-    target.fire("session_start");
+    target.fire("session_start", CTX);
     target.fire("turn_start");
     target.fire("turn_start");
     target.fire("agent_end");
     target.fire("session_shutdown");
     assert.deepEqual(calls, [
-      buildSessionBindArgs("7", "abc"),
+      buildSessionBindArgs("7", "sess-1"),
       buildReportArgs("7", "idle"),
       buildReportArgs("7", "working"),
       buildReportArgs("7", "idle"),
@@ -97,9 +99,8 @@ describe("luvus-status reporter", () => {
   it("registers listeners only once when both entries load", () => {
     const { exec } = makeExec();
     const target = makePi();
-    const reporter = createLuvusStatusReporter(exec, { ...ENV });
-    reporter.register(target.pi as never);
-    reporter.register(target.pi as never);
+    createLuvusStatusReporter(exec, { ...ENV }).register(target.pi as never);
+    createLuvusStatusReporter(exec, { ...ENV }).register(target.pi as never);
     assert.equal(target.handlers.get("turn_start")?.length, 1);
   });
 
