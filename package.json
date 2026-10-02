@@ -1,6 +1,6 @@
 {
   "name": "pi-luvus-subagents",
-  "version": "3.7.3",
+  "version": "0.10.0",
   "description": "Interactive subagents for pi — spawn and manage sub-agent sessions in Luvus panes (Luvus-only fork)",
   "keywords": [
     "pi-package"
@@ -15,7 +15,7 @@
   "author": "HazAT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/HazAT/pi-interactive-subagents"
+    "url": "https://github.com/slatkin/pi-luvus-subagents"
   },
   "type": "module",
   "scripts": {
