@@ -25,6 +25,7 @@ import {
   sendEscape,
   shellEscape,
   agentPrompt,
+  buildOscTitleLine,
   __pollForExitTest__,
 } from "../pi-extension/subagents/luvus.ts";
 import {
@@ -2817,6 +2818,44 @@ describe("luvus.ts", () => {
       assert.ok(escaped.endsWith("'"));
       // Inside single quotes, everything is literal
       assert.ok(escaped.includes("$world"));
+    });
+  });
+
+  describe("buildOscTitleLine", () => {
+    it("builds an OSC 2 title from name and task", () => {
+      assert.equal(
+        buildOscTitleLine("Scout", "Fix the login bug"),
+        "printf '\\033]2;%s\\007' 'Scout — Fix the login bug'",
+      );
+    });
+
+    it("strips control characters and escape sequences from hostile task text", () => {
+      const line = buildOscTitleLine("Scout", "Fix\x1b[2J the\x07 bug\nsecond line");
+      assert.equal(line, "printf '\\033]2;%s\\007' 'Scout — Fix[2J the bug'");
+      // No raw ESC or BEL survives (the format string only has literal \033/\007).
+      assert.ok(!line.includes("\x1b"));
+      assert.ok(!line.includes("\x07"));
+      assert.ok(!line.includes("second line"));
+    });
+
+    it("titles with the name alone when the task is missing or empty", () => {
+      const expected = "printf '\\033]2;%s\\007' 'Scout'";
+      assert.equal(buildOscTitleLine("Scout"), expected);
+      assert.equal(buildOscTitleLine("Scout", ""), expected);
+      assert.equal(buildOscTitleLine("Scout", "\n   \n"), expected);
+    });
+
+    it("returns an empty line when the name has no printable text", () => {
+      assert.equal(buildOscTitleLine(""), "");
+      assert.equal(buildOscTitleLine("\x1b\x07"), "");
+      assert.equal(buildOscTitleLine("   "), "");
+    });
+
+    it("truncates the task part to 48 characters", () => {
+      const task = "x".repeat(60);
+      const line = buildOscTitleLine("Scout", task);
+      assert.ok(line.includes(`Scout — ${task.slice(0, 48)}`));
+      assert.ok(!line.includes(task.slice(0, 49)));
     });
   });
 });

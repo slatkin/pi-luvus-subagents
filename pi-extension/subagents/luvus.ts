@@ -106,6 +106,34 @@ function slugifyPaneName(name: string): string {
   return /^[a-z]/.test(slug) ? slug : `s-${slug.slice(0, 30)}`;
 }
 
+/** C0 controls, DEL, and C1 controls (includes ESC, BEL, and the 8-bit CAP). */
+const OSC_TITLE_CONTROL_CHARS = /[\x00-\x1f\x7f-\x9f]/g;
+
+function firstNonEmptyLine(text: string): string {
+  for (const line of text.split("\n")) {
+    if (line.trim().length > 0) return line;
+  }
+  return "";
+}
+
+/**
+ * Build the OSC 2 title line for a subagent pane, or "" when the name has no
+ * printable text. The title is `<name> — <task>`, with the task taken from its
+ * first non-empty line and truncated to 48 characters; the name alone when
+ * there is no task text. Control characters are stripped so untrusted task
+ * text cannot smuggle terminal escape sequences, and the title is passed to
+ * printf as an argument (never as the format string).
+ */
+export function buildOscTitleLine(name: string, task?: string): string {
+  const cleanName = name.replace(OSC_TITLE_CONTROL_CHARS, "").trim();
+  if (cleanName.length === 0) return "";
+  const taskText = firstNonEmptyLine(task ?? "")
+    .replace(OSC_TITLE_CONTROL_CHARS, "")
+    .trim();
+  const title = taskText.length > 0 ? `${cleanName} — ${taskText.slice(0, 48)}` : cleanName;
+  return `printf '\\033]2;%s\\007' ${shellEscape(title)}`;
+}
+
 function paneReadText(result: LuvusResult): string {
   const { text } = result;
   if (typeof text !== "string") {

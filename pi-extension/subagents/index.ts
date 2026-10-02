@@ -28,6 +28,7 @@ import {
   shellEscape,
   readScreen,
   agentPrompt,
+  buildOscTitleLine,
   parseSurfacePlacement,
   type SurfacePlacement,
 } from "./luvus.ts";
@@ -1594,7 +1595,10 @@ async function launchSubagent(
         `# Claude Code subagent launch script for ${params.name}`,
         `# Generated: ${new Date().toISOString()}`,
         `# Surface: ${surface}`,
-      ].join("\n"),
+        buildOscTitleLine(params.name, params.task),
+      ]
+        .filter(Boolean)
+        .join("\n"),
     });
 
     const running: RunningSubagent = {
@@ -1726,7 +1730,10 @@ async function launchSubagent(
       `# Generated: ${new Date().toISOString()}`,
       `# Session: ${subagentSessionFile}`,
       `# Surface: ${surface}`,
-    ].join("\n"),
+      buildOscTitleLine(params.name, params.task),
+    ]
+      .filter(Boolean)
+      .join("\n"),
   });
 
   const running: RunningSubagent = {
@@ -2513,7 +2520,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             `# Session: ${params.sessionPath}`,
             `# Surface: ${surface}`,
             ...(resumeMsgFile ? [`# Resume message file: ${resumeMsgFile}`] : []),
-          ].join("\n"),
+            buildOscTitleLine(name, params.message),
+          ]
+            .filter(Boolean)
+            .join("\n"),
         });
 
         // Register as a running subagent for widget tracking
