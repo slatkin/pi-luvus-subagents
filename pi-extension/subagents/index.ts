@@ -57,6 +57,7 @@ import {
   type ActivityReadResult,
   type SubagentActivityState,
 } from "./activity.ts";
+import { createLuvusStatusReporter } from "./luvus-status.ts";
 import {
   IDLE_NUDGE_TEXT,
   decideIdleAction,
@@ -1902,6 +1903,10 @@ async function watchSubagent(
 }
 
 export default function subagentsExtension(pi: ExtensionAPI) {
+  // Live sidebar status for this pane (deduped per process when a
+  // subagent child also loads subagent-done.ts — registers only once).
+  createLuvusStatusReporter().register(pi);
+
   // Capture the UI context for widget updates
   pi.on("session_start", (_event, ctx) => {
     latestCtx = ctx;

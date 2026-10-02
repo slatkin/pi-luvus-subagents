@@ -1,0 +1,101 @@
+/**
+ * Pi → Luvus live-status bridge.
+ *
+ * Luvus detects pi panes via the process tree but has no screen rules for
+ * pi's TUI, so every pi pane reads `idle` (`no_positive_state_evidence`)
+ * even mid-turn. This module publishes a leased status instead, the same
+ * `agent report` API the Claude hook uses: `working` while a turn runs,
+ * `idle` while the session waits for input, released on shutdown so a
+ * clean exit never leaves a stale lease behind. Reports carry a short TTL
+ * as a backstop for unclean kills, and repeat statuses are skipped so
+ * high-frequency events cost nothing.
+ */
+import { execFileSync } from "node:child_process";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+/** Lease source id for `agent report` / `agent release`. */
+export const LUVUS_STATUS_SOURCE = "pi-luvus-status";
+/** Lease TTL in seconds — re-reported on every transition, so a short
+ *  backstop is safe even for long turns (worst case after kill -9). */
+export const LUVUS_STATUS_TTL_S = 300;
+
+const REGISTERED_KEY = "__piLuvusStatusRegistered";
+
+export type LuvusAgentStatus = "working" | "idle";
+
+export function buildReportArgs(pane: string, status: LuvusAgentStatus): string[] {
+  return [
+    "agent",
+    "report",
+    pane,
+    "--source",
+    LUVUS_STATUS_SOURCE,
+    "--kind",
+    "pi",
+    "--status",
+    status,
+    "--ttl",
+    String(LUVUS_STATUS_TTL_S),
+  ];
+}
+
+export function buildReleaseArgs(pane: string): string[] {
+  return ["agent", "release", pane, "--source", LUVUS_STATUS_SOURCE];
+}
+
+/** The caller's pane when pi runs inside Luvus, else null (same env check
+ *  as isMuxAvailable in luvus.ts, plus the pane id self-reports target). */
+export function luvusStatusPane(env: NodeJS.ProcessEnv = process.env): string | null {
+  if (!env.LUVUS_ENV || !env.LUVUS_BIN_PATH || !env.LUVUS_PANE_ID) return null;
+  return env.LUVUS_PANE_ID;
+}
+
+export interface LuvusStatusReporter {
+  report(status: LuvusAgentStatus): void;
+  release(): void;
+  register(pi: ExtensionAPI): void;
+}
+
+export function createLuvusStatusReporter(
+  exec: (bin: string, args: string[]) => void = (bin, args) =>
+    execFileSync(bin, args, { encoding: "utf8", timeout: 5000, stdio: ["ignore", "ignore", "ignore"] }),
+  env: NodeJS.ProcessEnv = process.env,
+): LuvusStatusReporter {
+  let lastReported: LuvusAgentStatus | null = null;
+
+  function report(status: LuvusAgentStatus): void {
+    const pane = luvusStatusPane(env);
+    if (!pane || lastReported === status) return;
+    try {
+      exec(env.LUVUS_BIN_PATH as string, buildReportArgs(pane, status));
+      lastReported = status;
+    } catch {
+      // Best effort — a failed report retries on the next transition.
+    }
+  }
+
+  function release(): void {
+    const pane = luvusStatusPane(env);
+    if (!pane || lastReported === null) return;
+    try {
+      exec(env.LUVUS_BIN_PATH as string, buildReleaseArgs(pane));
+    } catch {
+      // Releasing a missing/expired lease errors — the lease is gone either way.
+    } finally {
+      lastReported = null;
+    }
+  }
+
+  function register(pi: ExtensionAPI): void {
+    const global = globalThis as Record<string, unknown>;
+    if (global[REGISTERED_KEY]) return;
+    global[REGISTERED_KEY] = true;
+    pi.on("session_start", () => report("idle"));
+    pi.on("agent_start", () => report("working"));
+    pi.on("turn_start", () => report("working"));
+    pi.on("agent_end", () => report("idle"));
+    pi.on("session_shutdown", () => release());
+  }
+
+  return { report, release, register };
+}
