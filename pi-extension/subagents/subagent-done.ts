@@ -17,6 +17,7 @@ import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { writeFileSync } from "node:fs";
 import { createSubagentActivityRecorder } from "./activity.ts";
+import { createLuvusStatusReporter } from "./luvus-status.ts";
 
 export function shouldMarkUserTookOver(agentStarted: boolean): boolean {
   return agentStarted;
@@ -120,6 +121,10 @@ export default function (pi: ExtensionAPI) {
     runningChildId: process.env.PI_SUBAGENT_ID,
     activityFile: process.env.PI_SUBAGENT_ACTIVITY_FILE,
   });
+
+  // Live sidebar status for this pane (deduped per process when index.ts
+  // also loads — the reporter registers its listeners only once).
+  createLuvusStatusReporter().register(pi);
 
   // ── Agent completion nudge configuration ──
   /** Delay (ms) before sending a nudge after agent_end. Configurable via env var. */
