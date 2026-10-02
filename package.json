@@ -1,9 +1,15 @@
 {
   "name": "pi-luvus-subagents",
-  "version": "3.7.2",
-  "description": "Interactive subagents for pi - spawn, orchestrate, and manage sub-agent sessions in Luvus panes",
+  "version": "3.7.3",
+  "description": "Interactive subagents for pi — spawn and manage sub-agent sessions in Luvus panes (Luvus-only fork)",
   "keywords": [
     "pi-package"
+  ],
+  "files": [
+    "pi-extension/",
+    "agents/",
+    "README.md",
+    "LICENSE"
   ],
   "license": "MIT",
   "author": "slatkin",
