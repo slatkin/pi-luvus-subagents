@@ -113,10 +113,9 @@ export default function (pi: ExtensionAPI) {
   const subagentName = process.env.PI_SUBAGENT_NAME ?? "";
   const subagentAgent = process.env.PI_SUBAGENT_AGENT ?? "";
   const deniedToolsValue = process.env.PI_DENY_TOOLS;
-  // Parsed for compatibility; the auto-exit short-circuit is gone — the env var
-  // no longer causes an exit anywhere in this extension.
+  // Parsed for the restored auto-exit path below (2026-10-02-restore-auto-exit):
+  // an auto-exit agent whose turn ends normally exits itself.
   const autoExit = process.env.PI_SUBAGENT_AUTO_EXIT === "1";
-  void autoExit;
   const recorder = createSubagentActivityRecorder({
     runningChildId: process.env.PI_SUBAGENT_ID,
     activityFile: process.env.PI_SUBAGENT_ACTIVITY_FILE,
@@ -232,6 +231,7 @@ export default function (pi: ExtensionAPI) {
     recorder.sessionStart();
     doneCalled = false;
     userInputAfterAgentEnd = false;
+    userTookOver = false;
     clearNudgeTimer();
     const tools = pi.getAllTools();
     toolNames = tools.map((t) => t.name).sort();
@@ -246,9 +246,9 @@ export default function (pi: ExtensionAPI) {
     userInputAfterAgentEnd = true;
     clearNudgeTimer();
     // Ignore the initial task message that starts an autonomous subagent.
-    // Only inputs after the first agent run has started count as user takeover.
-    if (!shouldMarkUserTookOver(agentStarted)) return;
-    userTookOver = true;
+    // Only inputs after the first agent run has started count as user takeover,
+    // which keeps an auto-exit session open instead of exiting it.
+    if (shouldMarkUserTookOver(agentStarted)) userTookOver = true;
   });
 
   pi.on("before_agent_start", () => {
@@ -298,8 +298,27 @@ export default function (pi: ExtensionAPI) {
     // Only input arriving after this point counts as a takeover; input that
     // landed mid-run (e.g. subagent_message) must not silence the nudge.
     userInputAfterAgentEnd = false;
-    // Auto-exit is removed: a normal stop leaves the session open and nudges
-    // the agent to call subagent_done if it forgot. Aborted stops stay quiet.
+
+    // Restored auto-exit: an auto-exit agent whose turn ended normally exits
+    // itself instead of waiting on the nudge. A taken-over session stays open
+    // (falls through to the nudge path); aborted stops stay open; the error
+    // branch above already handled provider failures.
+    if (autoExit && !userTookOver && shouldAutoExitOnAgentEnd(userTookOver, messages)) {
+      recorder.agentEndDone();
+      if (sessionFile) {
+        try {
+          writeFileSync(`${sessionFile}.exit`, JSON.stringify({ type: "done" }));
+        } catch {
+          // Best effort — without the sidecar the watcher falls back to the
+          // session file / screen sentinel.
+        }
+      }
+      ctx.shutdown();
+      return;
+    }
+
+    // A normal stop leaves the session open and nudges
+    // the agent to call subagent_done if it forgot.
     if (shouldScheduleAgentEndNudge(messages)) {
       scheduleAgentEndNudge(pi);
     } else {

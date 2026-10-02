@@ -1504,6 +1504,70 @@ describe("subagent-done nudge", () => {
     });
   });
 
+  it("auto-exit agent_end on a normal stop writes the done sidecar and shuts down", () => {
+    withTempDir((dir) => {
+      const sessionFile = join(dir, "child.jsonl");
+      const { handlers, restoreEnv } = loadChildExtension({
+        PI_SUBAGENT_SESSION: sessionFile,
+        PI_SUBAGENT_AUTO_EXIT: "1",
+        PI_SUBAGENT_NUDGE_DISABLE: "1",
+      });
+      try {
+        fire(handlers, "agent_start");
+        let shutdownCalled = false;
+        fire(handlers, "agent_end", { messages: [{ role: "assistant", stopReason: "stop" }] }, { shutdown: () => (shutdownCalled = true) });
+
+        assert.equal(shutdownCalled, true);
+        assert.deepEqual(JSON.parse(readFileSync(`${sessionFile}.exit`, "utf8")), { type: "done" });
+      } finally {
+        restoreEnv();
+      }
+    });
+  });
+
+  it("auto-exit agent_end on an aborted stop keeps the session open", () => {
+    withTempDir((dir) => {
+      const sessionFile = join(dir, "child.jsonl");
+      const { handlers, restoreEnv } = loadChildExtension({
+        PI_SUBAGENT_SESSION: sessionFile,
+        PI_SUBAGENT_AUTO_EXIT: "1",
+        PI_SUBAGENT_NUDGE_DISABLE: "1",
+      });
+      try {
+        fire(handlers, "agent_start");
+        let shutdownCalled = false;
+        fire(handlers, "agent_end", { messages: [{ role: "assistant", stopReason: "aborted" }] }, { shutdown: () => (shutdownCalled = true) });
+
+        assert.equal(shutdownCalled, false);
+        assert.equal(existsSync(`${sessionFile}.exit`), false);
+      } finally {
+        restoreEnv();
+      }
+    });
+  });
+
+  it("user takeover keeps an auto-exit session open after a normal stop", () => {
+    withTempDir((dir) => {
+      const sessionFile = join(dir, "child.jsonl");
+      const { handlers, restoreEnv } = loadChildExtension({
+        PI_SUBAGENT_SESSION: sessionFile,
+        PI_SUBAGENT_AUTO_EXIT: "1",
+        PI_SUBAGENT_NUDGE_DISABLE: "1",
+      });
+      try {
+        fire(handlers, "agent_start");
+        fire(handlers, "input");
+        let shutdownCalled = false;
+        fire(handlers, "agent_end", { messages: [{ role: "assistant", stopReason: "stop" }] }, { shutdown: () => (shutdownCalled = true) });
+
+        assert.equal(shutdownCalled, false);
+        assert.equal(existsSync(`${sessionFile}.exit`), false);
+      } finally {
+        restoreEnv();
+      }
+    });
+  });
+
   it("agent_end on an error stop still writes the error sidecar and shuts down", () => {
     withTempDir((dir) => {
       const sessionFile = join(dir, "child.jsonl");

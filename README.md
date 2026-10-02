@@ -350,9 +350,11 @@ session-mode: lineage-only
 
 ### `auto-exit` and the completion nudge
 
-Every sub-agent session exits through an explicit tool call: `subagent_done` to finish, or `caller_ping` to hand a question back to the parent. There is no silent auto-shutdown — even agents with `auto-exit: true` must call `subagent_done` when they finish.
+Agents with `auto-exit: true` exit themselves: when the agent finishes a turn normally (without the user having taken over the pane), the child writes the `done` `.exit` sidecar and the session ends — no `subagent_done` call needed. The last assistant message becomes the result returned to the parent. An aborted turn (Escape) keeps the session open for inspection or another prompt, and error stops still exit immediately with the error sidecar reported to the parent.
 
-To make that reliable, the child extension **nudges itself**: when the agent finishes a turn normally without calling `subagent_done`, it receives a follow-up reminder after 5 seconds:
+If the user types into an auto-exit agent's pane after its first run, the session becomes user-owned: auto-exit is disabled from that point and the nudge below takes over.
+
+For everyone else, every session exits through an explicit tool call: `subagent_done` to finish, or `caller_ping` to hand a question back to the parent. To make that reliable, the child extension **nudges itself**: when the agent finishes a turn normally without calling `subagent_done`, it receives a follow-up reminder after 5 seconds:
 
 > [Automated reminder] Your last turn ended but this session is still open.
 > If your task is complete, call the subagent_done tool now, with no other text. Your last message was already delivered as your report — do not repeat or summarise it.
@@ -370,7 +372,7 @@ Configure the nudge with environment variables (read by the child at launch):
 
 **Parent-side idle watchdog.** The child's nudge depends on the child and the model, so the parent backs it up. For non-interactive subagents, if the child's activity file has said `waiting` (turn ended) for 30 seconds without the session exiting, the parent types a reminder into the pane itself. After two such reminders, if the child is still waiting another 30 seconds, the parent finishes it as if `subagent_done` had been called: the last assistant message becomes the result and the pane is closed. Interactive subagents (for example `planner`) are never touched. The timings live in `pi-extension/subagents/idle-watchdog.ts`.
 
-**What `auto-exit: true` still does** — it no longer terminates anything. It shapes defaults:
+**What `auto-exit: true` does** — it terminates the session when the agent's turn completes normally (see above), and shapes defaults:
 
 - The task hint tells the agent upfront to call `subagent_done` when finished ("Complete your task autonomously. Call subagent_done when finished.")
 - It is the default for `interactive` (see below): `auto-exit: true` agents are treated as autonomous and get stall pings; agents without it are interactive and stay quiet
