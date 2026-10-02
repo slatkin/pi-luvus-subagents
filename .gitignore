@@ -4,3 +4,7 @@ config.json
 !.pi/skills/
 !.pi/settings.json
 .claude/settings.local.json
+.claude
+.claude
+.handoffs/
+.opencode/
