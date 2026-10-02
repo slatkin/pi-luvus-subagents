@@ -11,7 +11,7 @@
 
 ## 3. Docs
 
-- [ ] 3.1 Note in `README.md` (pane naming / AGENTS sidebar context) that subagent panes carry an OSC title `<name> — <task>` shown in the sidebar, and that aliases are unchanged.
+- [x] 3.1 Note in `README.md` (pane naming / AGENTS sidebar context) that subagent panes carry an OSC title `<name> — <task>` shown in the sidebar, and that aliases are unchanged.
 
 ## 4. Verification
 
