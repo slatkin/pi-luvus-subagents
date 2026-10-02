@@ -5,70 +5,45 @@ description: Run the integration test suite and verify all sessions end-to-end. 
 
 # Run Integration Tests
 
-Execute the integration test suite inside cmux, then introspect every spawned session to verify the full subagent lifecycle worked end-to-end.
+Execute the integration test suite inside a Luvus pane, then introspect every spawned session to verify the full subagent lifecycle worked end-to-end.
 
 ## Step 1: Preflight Checks
 
 Verify the environment is ready:
 
 ```bash
-echo "CMUX_SOCKET_PATH=$CMUX_SOCKET_PATH"
-echo "TMUX=$TMUX"
+echo "LUVUS_ENV=$LUVUS_ENV"
+echo "LUVUS_BIN_PATH=$LUVUS_BIN_PATH"
+echo "LUVUS_PANE_ID=$LUVUS_PANE_ID"
 node --version
 ```
 
-- At least one of `CMUX_SOCKET_PATH` or `TMUX` must be set
+- All three `LUVUS_*` variables must be set (pi is running inside a Luvus pane)
 - Node 22+ required
 
-If neither mux is available, stop and tell the user to run inside cmux or tmux.
+If not inside Luvus, stop and tell the user to run pi inside a Luvus pane — the integration tests skip themselves without the Luvus environment.
 
 ## Step 2: Run Unit Tests
 
 Run the fast unit tests first — if these fail, skip integration tests:
 
 ```bash
-cd /Users/haza/Projects/pi-interactive-subagents && node --test test/test.ts
+cd /path/to/pi-luvus-subagents && npm test
 ```
 
-All 114 unit tests must pass. If any fail, stop and fix them before proceeding.
+All unit tests must pass. If any fail, stop and fix them before proceeding.
 
 ## Step 3: Run Integration Tests
 
-Use cmux to run the integration tests in a dedicated surface so the main session stays responsive.
+Run the integration suite in this pane (the pane is already the dedicated surface; `--test-concurrency=1` serializes suites that assert global Luvus state):
 
 ```bash
-SURFACE=$(cmux new-surface --type terminal | awk '{print $2}')
-sleep 0.5
-cmux send --surface $SURFACE 'cd /Users/haza/Projects/pi-interactive-subagents && node --test --test-concurrency=1 test/integration/mux-surface.test.ts test/integration/subagent-lifecycle.test.ts 2>&1; echo __TESTS_DONE_$?__\n'
-```
-
-`--test-concurrency=1` is required: the focus-preservation test asserts global mux state and would race against parallel suites.
-
-Poll until the sentinel appears:
-
-```bash
-cmux read-screen --surface $SURFACE --lines 200
-```
-
-Look for `__TESTS_DONE_0__` (success) or `__TESTS_DONE_1__` (failure). Poll every 15 seconds. Timeout after 10 minutes.
-
-Once done, capture the full output and close the surface:
-
-```bash
-cmux read-screen --surface $SURFACE --scrollback --lines 500
-cmux close-surface --surface $SURFACE
+node --test --test-concurrency=1 test/integration/*.test.ts
 ```
 
 ### Expected results
 
-| Suite | Tests | Approx Duration |
-|-------|-------|-----------------|
-| `mux-surface` | 8 | ~45s |
-| `subagent-lifecycle` | 7 | ~170s |
-
-All 15 tests must pass. If any fail, report the failure output and stop.
-
-The long-running `keeps a long active tool call from surfacing false stalled status` test in `subagent-lifecycle` runs ~100s on its own — total wall time is ~3:30.
+All integration tests must pass. If any fail, report the failure output and stop.
 
 ### Configuration
 
@@ -234,9 +209,8 @@ Print a final summary:
 ╭─────────────────────────────────────────────╮
 │ Integration Test Results                    │
 ├─────────────────────────────────────────────┤
-│ Unit tests:        114/114 ✅               │
-│ Mux surface:       8/8  ✅                  │
-│ Subagent lifecycle: 7/7  ✅                 │
+│ Unit tests:        all pass ✅              │
+│ Integration tests: all pass ✅              │
 │ Session validation: X sessions verified ✅  │
 │ Fork linkage:      verified ✅              │
 ╰─────────────────────────────────────────────╯

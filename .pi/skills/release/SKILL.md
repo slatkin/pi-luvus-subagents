@@ -57,13 +57,19 @@ Format as markdown. Omit empty sections. Strip the `type(scope):` prefix from ea
 Install:
 
 ```bash
-pi install git:github.com/HazAT/pi-interactive-subagents@v<VERSION>
+pi install npm:pi-luvus-subagents@<VERSION>
+```
+
+Or pinned to the git tag:
+
+```bash
+pi install git:github.com/slatkin/pi-luvus-subagents@v<VERSION>
 ```
 
 Or latest:
 
 ```bash
-pi install git:github.com/HazAT/pi-interactive-subagents
+pi install npm:pi-luvus-subagents
 ```
 ````
 

@@ -2,7 +2,7 @@
 
 Async subagents for [pi](https://github.com/badlogic/pi-mono) — spawn, orchestrate, and manage sub-agent sessions in [Luvus](https://luvus.dev) panes. **Fully non-blocking** — the main agent keeps working while subagents run in the background.
 
-This is a Luvus-only fork of [HazAT/pi-interactive-subagents](https://github.com/HazAT/pi-interactive-subagents); Luvus is the only supported terminal host. Design decisions are recorded in [`LUVUS-FORK.md`](LUVUS-FORK.md). It is rewritten to work with Luvus (only), with tab vs pane and Luvus-based interagent messaging.
+This is a Luvus-only fork of [HazAT/pi-interactive-subagents](https://github.com/HazAT/pi-interactive-subagents); the completion-nudge design credits [maplezzk's port](https://github.com/maplezzk). Luvus is the only supported terminal host. Design decisions are recorded in [`LUVUS-FORK.md`](LUVUS-FORK.md). It is rewritten to work with Luvus (only), with tab vs pane and Luvus-based interagent messaging.
 
 ## How It Works
 
@@ -26,6 +26,10 @@ subagent({ name: "Scout: DB", agent: "scout", task: "Map database schema" });
 ## Install
 
 ```bash
+pi install npm:pi-luvus-subagents
+# or pinned to a git ref:
+pi install git:github.com/slatkin/pi-luvus-subagents@v3.7.3
+# or from a local checkout:
 pi install /path/to/pi-luvus-subagents
 ```
 
@@ -497,7 +501,9 @@ Every sub-agent session displays a compact tools widget showing available and de
 
 ## Acknowledgements
 
-The sub-agent status supervision and turn-only interruption features were inspired by [RepoPrompt](https://repoprompt.com/)'s sub-agent snapshot polling and run cancellation features.
+- [HazAT](https://github.com/HazAT) — original pi-interactive-subagents
+- [maplezzk](https://github.com/maplezzk) — the completion-nudge design ported here
+- The sub-agent status supervision and turn-only interruption features were inspired by [RepoPrompt](https://repoprompt.com/)'s sub-agent snapshot polling and run cancellation features.
 
 ---
 
