@@ -130,7 +130,7 @@ export function buildOscTitleLine(name: string, task?: string): string {
   const taskText = firstNonEmptyLine(task ?? "")
     .replace(OSC_TITLE_CONTROL_CHARS, "")
     .trim();
-  const title = taskText.length > 0 ? `${cleanName} — ${taskText.slice(0, 48)}` : cleanName;
+  const title = taskText.length > 0 ? `${cleanName} — ${Array.from(taskText).slice(0, 48).join("")}` : cleanName;
   // 8s is a fixed heuristic: pi wipes a title emitted before it boots (it
   // enters the alternate screen), so emit it late and backgrounded. If pi
   // boots slower the title lands mid-boot and is wiped again — upgrade path
