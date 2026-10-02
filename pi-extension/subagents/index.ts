@@ -71,9 +71,15 @@ const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
 // Survive /reload: clear timers and abort poll loops from the previous module load.
 // /reload re-imports this file, giving fresh module-level state, but closures from
 // the old module keep running. See https://github.com/HazAT/pi-interactive-subagents/issues/5
-const WIDGET_INTERVAL_KEY = Symbol.for("pi-subagents/widget-interval");
-const STATUS_INTERVAL_KEY = Symbol.for("pi-subagents/status-interval");
-const POLL_ABORT_KEY = Symbol.for("pi-subagents/poll-abort-controller");
+//
+// Keys are namespaced per module URL: multiple copies of this extension can coexist
+// in one process (e.g. a global install plus the project copy), and a shared key
+// would let one copy abort the other's poll watchers. Same-URL /reload still resolves
+// to the same key, so cleanup across reloads keeps working.
+const INSTANCE_KEY = `#${import.meta.url}`;
+const WIDGET_INTERVAL_KEY = Symbol.for(`pi-subagents/widget-interval${INSTANCE_KEY}`);
+const STATUS_INTERVAL_KEY = Symbol.for(`pi-subagents/status-interval${INSTANCE_KEY}`);
+const POLL_ABORT_KEY = Symbol.for(`pi-subagents/poll-abort-controller${INSTANCE_KEY}`);
 
 {
   const prevInterval = (globalThis as any)[WIDGET_INTERVAL_KEY];
