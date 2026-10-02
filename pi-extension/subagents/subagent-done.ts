@@ -6,11 +6,12 @@
  * - Respects PI_DENY_TOOLS for its own tools: a denied tool is not registered,
  *   `caller_ping` included; `subagent_done` is never denied.
  *
- * Auto-exit is removed: `agent_end` never writes a `done` `.exit` sidecar on its
- * own, regardless of PI_SUBAGENT_AUTO_EXIT. The only success-path exits are the
- * explicit `subagent_done` / `caller_ping` tools; an agent that finishes its turn
- * without calling either is nudged. Provider-error turns still write the error
- * `.exit` sidecar so the parent learns about failures promptly.
+ * Auto-exit: with PI_SUBAGENT_AUTO_EXIT=1, a normal `agent_end` (no user takeover,
+ * not aborted) writes the `done` `.exit` sidecar and shuts the session down.
+ * Otherwise the only success-path exits are the explicit `subagent_done` /
+ * `caller_ping` tools, and an agent that finishes without calling either is
+ * nudged. Provider-error turns write the error `.exit` sidecar so the parent
+ * learns about failures promptly.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
@@ -42,13 +43,10 @@ export function shouldScheduleAgentEndNudge(
   return false;
 }
 
-export function shouldAutoExitOnAgentEnd(
-  _userTookOver: boolean,
-  messages: any[] | undefined,
-): boolean {
-  // Manual input should not strand an auto-exit subagent. If the latest agent
-  // turn completed normally, close the session. Escape/abort still leaves it
-  // open for inspection or another prompt.
+export function shouldAutoExitOnAgentEnd(messages: any[] | undefined): boolean {
+  // If the latest agent turn completed normally, close the session. Escape/abort
+  // still leaves it open for inspection or another prompt. User takeover is the
+  // caller's concern.
   //
   // stopReason: "error" (e.g. exhausted retries on a provider overload) also
   // returns true — we want to shut down so the parent is woken up — but we
@@ -303,7 +301,7 @@ export default function (pi: ExtensionAPI) {
     // itself instead of waiting on the nudge. A taken-over session stays open
     // (falls through to the nudge path); aborted stops stay open; the error
     // branch above already handled provider failures.
-    if (autoExit && !userTookOver && shouldAutoExitOnAgentEnd(userTookOver, messages)) {
+    if (autoExit && !userTookOver && shouldAutoExitOnAgentEnd(messages)) {
       recorder.agentEndDone();
       if (sessionFile) {
         try {
@@ -317,8 +315,8 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    // A normal stop leaves the session open and nudges
-    // the agent to call subagent_done if it forgot.
+    // A normal stop leaves the session open and nudges the agent to call
+    // subagent_done if it forgot.
     if (shouldScheduleAgentEndNudge(messages)) {
       scheduleAgentEndNudge(pi);
     } else {

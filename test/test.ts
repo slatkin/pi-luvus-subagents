@@ -1361,19 +1361,14 @@ describe("subagent-done.ts", () => {
   });
 
   describe("shouldAutoExitOnAgentEnd", () => {
-    it("auto-exits after normal completion when there was no takeover", () => {
+    it("auto-exits after normal completion", () => {
       const messages = [{ role: "assistant", stopReason: "stop" }];
-      assert.equal(shouldAutoExitOnAgentEnd(false, messages), true);
-    });
-
-    it("auto-exits after normal completion even when the user sent the prompt", () => {
-      const messages = [{ role: "assistant", stopReason: "stop" }];
-      assert.equal(shouldAutoExitOnAgentEnd(true, messages), true);
+      assert.equal(shouldAutoExitOnAgentEnd(messages), true);
     });
 
     it("stays open after Escape aborts the run", () => {
       const messages = [{ role: "assistant", stopReason: "aborted" }];
-      assert.equal(shouldAutoExitOnAgentEnd(false, messages), false);
+      assert.equal(shouldAutoExitOnAgentEnd(messages), false);
     });
 
     it("still exits when the latest turn ended with stopReason=error", () => {
@@ -1381,7 +1376,7 @@ describe("subagent-done.ts", () => {
       // parent is woken. The error sidecar (written separately) carries the
       // failure detail; staying open would just strand the worker.
       const messages = [{ role: "assistant", stopReason: "error", errorMessage: "529 overloaded" }];
-      assert.equal(shouldAutoExitOnAgentEnd(false, messages), true);
+      assert.equal(shouldAutoExitOnAgentEnd(messages), true);
     });
   });
 
